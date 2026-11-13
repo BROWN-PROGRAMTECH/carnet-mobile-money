@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'cm.carnet.mobilemoney'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'cm.carnet.mobilemoney'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '0.1-prototype'
+    }
+
+    // Clé de test fixe : permet d'installer les nouvelles versions par-dessus l'ancienne.
+    // À remplacer par une vraie clé privée avant toute diffusion.
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

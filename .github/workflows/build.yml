@@ -1,0 +1,69 @@
+name: Compiler l'APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Préparer la clé de test
+        run: base64 -d app/debug.keystore.b64 > app/debug.keystore
+
+      - name: Compiler
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Renommer l'APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk carnet-mobile-money.apk
+
+      - name: Conserver l'APK (onglet Actions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: carnet-mobile-money-apk
+          path: carnet-mobile-money.apk
+
+      - name: Publier l'APK (page Releases, téléchargeable depuis le téléphone)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prototype-${{ github.run_number }}
+          name: Prototype ${{ github.run_number }}
+          files: carnet-mobile-money.apk
+          prerelease: true
+
+      - name: Signaler un échec de compilation
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Compilation n° ${{ github.run_number }} échouée (commit ${{ github.sha }})."
+            echo
+            echo '```'
+            if [ -f build.log ]; then
+              grep -E "error:|e: |FAILURE|What went wrong|\.java:[0-9]+|AAPT|Execution failed|> " build.log | head -120
+              echo "-----"
+              tail -n 60 build.log
+            else
+              echo "Pas de journal de compilation (échec avant l'étape Compiler)."
+            fi
+            echo '```'
+          } > rapport.md
+          gh issue create --repo "${{ github.repository }}" --title "Échec de compilation n° ${{ github.run_number }}" --body-file rapport.md
