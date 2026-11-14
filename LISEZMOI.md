@@ -2,6 +2,11 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Version 0.6.2 : correction de la fermeture au démarrage
+
+- L'application se fermait dès l'ouverture (affichage de l'état en haut de l'écran qui s'appelait lui-même en boucle). Corrigé.
+- `CloudConfig.java` est désormais inclus dans le zip, avec les valeurs du projet Supabase.
+
 ## Version 0.6.1 : protection contre les fermetures
 
 - Si une page ne peut pas s'afficher, l'application reste ouverte et affiche l'erreur au lieu de se fermer.

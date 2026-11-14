@@ -26,7 +26,7 @@ import java.util.UUID;
 public final class Cloud {
     private Cloud() {}
 
-    public static final String VERSION_APP = "0.6.1";
+    public static final String VERSION_APP = "0.6.2";
     private static final String DOMAIN = "@carnet-mm.app";
     private static final int PAGE = 1000, BATCH = 500;
 

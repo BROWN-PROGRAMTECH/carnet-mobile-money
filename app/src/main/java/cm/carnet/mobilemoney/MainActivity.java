@@ -679,7 +679,7 @@ public class MainActivity extends Activity {
     }
 
     private void setStatus(String s) {
-        setStatus(s);
+        status.setText(s);
     }
 
     /** Retire une vue de son ancien parent pour pouvoir la replacer (champs de saisie conservés). */
