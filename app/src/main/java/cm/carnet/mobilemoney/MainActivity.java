@@ -37,35 +37,48 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Écran unique : autorisation, période, soldes par opérateur, journal, à vérifier, exports. */
+/**
+ * Caisse automatique : chaque opération lue dans un SMS devient une ligne de caisse au montant non modifiable.
+ * L'utilisateur la classe (Vente, Paiement, Don, Personnel, Autre) et ajuste le motif. Les espèces sont saisies à la main.
+ */
 public class MainActivity extends Activity {
     private static final int REQ_PERM = 1, REQ_XLSX = 2, REQ_CSV = 3, REQ_SMS = 4;
     private static final int MAX_ROWS = 400;
     private static final String[] PERIODS = {"Aujourd'hui", "7 jours", "Ce mois", "Tout"};
+    private static final int CUSTOM = 4;
+    private static final int TAB_JOURNAL = 0, TAB_CLASSER = 1, TAB_ESPECES = 2, TAB_CHECK = 3;
+    private static final String[] COURT = {"Vente", "Paiement", "Don", "Perso", "Autre"};
 
     private static final int BG = Color.parseColor("#F3F5F2"), SURFACE = Color.WHITE, INK = Color.parseColor("#17201D"),
             MUTED = Color.parseColor("#5B6662"), LINE = Color.parseColor("#D8DED9"), ACCENT = Color.parseColor("#0E6A5B"),
-            OM = Color.parseColor("#D9650F"), MOMO = Color.parseColor("#B88A00"), GOOD = Color.parseColor("#1E7546"),
-            WARN = Color.parseColor("#9A5600"), BAD = Color.parseColor("#B0261D"), GOOD_BG = Color.parseColor("#E3F1E8"),
-            BAD_BG = Color.parseColor("#F8E1DF"), WARN_BG = Color.parseColor("#F8EBD8");
+            OM = Color.parseColor("#D9650F"), MOMO = Color.parseColor("#B88A00"), CASH = Color.parseColor("#3B5BA5"),
+            GOOD = Color.parseColor("#1E7546"), WARN = Color.parseColor("#9A5600"), BAD = Color.parseColor("#B0261D"),
+            GOOD_BG = Color.parseColor("#E3F1E8"), BAD_BG = Color.parseColor("#F8E1DF"), WARN_BG = Color.parseColor("#F8EBD8"),
+            PURPLE = Color.parseColor("#6B4FA0");
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private LinearLayout permBox, accounts, list;
+    private LinearLayout permBox, cards, list;
     private TextView status;
-    private Button tabJournal, tabCheck;
+    private final Button[] tabs = new Button[4];
     private final Button[] periodButtons = new Button[PERIODS.length];
     private Button customButton;
-    /** Période précise choisie par l'utilisateur (index 4). */
+    private int period = 0, tab = TAB_JOURNAL;
     private long customFrom, customTo;
-    private int period = 2;
-    private boolean showCheck;
-    private Analyzer.Result result;
     private boolean loading;
+
+    private Analyzer.Result result;
+    private Map<String, Caisse.Classement> classements = new HashMap<>();
+    private Map<String, String> regles = new HashMap<>();
+    private List<Caisse.Saisie> saisies = new ArrayList<>();
+    private List<Caisse.Jour> jours = new ArrayList<>();
+    private Caisse.Bilan bilan;
 
     private final BroadcastReceiver onNewSms = new BroadcastReceiver() {
         @Override
@@ -79,12 +92,10 @@ public class MainActivity extends Activity {
         super.onCreate(b);
         getWindow().setStatusBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-        try { period = Integer.parseInt(Store.pref(this, "periode", "2")); } catch (Exception ignored) {}
-        try {
-            customFrom = Long.parseLong(Store.pref(this, "debut", "0"));
-            customTo = Long.parseLong(Store.pref(this, "fin", "0"));
-        } catch (Exception ignored) {}
-        if (period < 0 || period > PERIODS.length || (period == PERIODS.length && customTo <= 0)) period = 2;
+        period = (int) Store.prefLong(this, "periode", 0);
+        customFrom = Store.prefLong(this, "debut", 0);
+        customTo = Store.prefLong(this, "fin", 0);
+        if (period < 0 || period > CUSTOM || (period == CUSTOM && customTo <= 0)) period = 0;
         buildUi();
     }
 
@@ -129,9 +140,10 @@ public class MainActivity extends Activity {
         if (code == REQ_PERM) refreshPermissionState();
     }
 
+    private boolean agent(String op) { return Store.prefBool(this, "agent" + op, false); }
+
     // ---------- Période ----------
 
-    /** {début, fin} en millisecondes pour la période choisie. */
     private long[] range() {
         Calendar c = Calendar.getInstance();
         c.set(Calendar.HOUR_OF_DAY, 0);
@@ -142,7 +154,7 @@ public class MainActivity extends Activity {
             case 0: break;
             case 1: c.add(Calendar.DAY_OF_MONTH, -6); break;
             case 2: c.set(Calendar.DAY_OF_MONTH, 1); break;
-            case 4: return new long[] {customFrom, customTo};
+            case CUSTOM: return new long[] {customFrom, customTo};
             default: return new long[] {0, Long.MAX_VALUE};
         }
         return new long[] {c.getTimeInMillis(), Long.MAX_VALUE};
@@ -151,12 +163,18 @@ public class MainActivity extends Activity {
     private String periodLabel() {
         long[] r = range();
         SimpleDateFormat d = new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE);
-        if (period == PERIODS.length) return "Du " + d.format(new Date(r[0])) + " au " + d.format(new Date(r[1]));
+        if (period == CUSTOM) return "Du " + d.format(new Date(r[0])) + " au " + d.format(new Date(r[1]));
         if (r[0] == 0) return "Tout l'historique";
-        return PERIODS[period] + " (depuis le " + new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(new Date(r[0])) + ")";
+        return PERIODS[period] + " (depuis le " + d.format(new Date(r[0])) + ")";
     }
 
-    // ---------- Lecture des SMS ----------
+    private void setPeriod(int p) {
+        period = p;
+        Store.savePref(this, "periode", String.valueOf(p));
+        render();
+    }
+
+    // ---------- Chargement ----------
 
     private void reload(boolean importInbox) {
         if (loading) return;
@@ -168,14 +186,20 @@ public class MainActivity extends Activity {
             try {
                 SmsParser.Config cfg = Store.config(this);
                 if (importInbox && hasSmsPermission()) added = importInbox(cfg);
-                Analyzer.Result r = Analyzer.analyse(Store.get(this).all(), cfg);
+                Store store = Store.get(this);
+                Analyzer.Result r = Analyzer.analyse(store.all(), cfg);
                 if (!r.ownerOm.isEmpty()) Store.savePref(this, "ownerOmAuto", r.ownerOm);
+                Map<String, Caisse.Classement> cl = store.classements();
+                Map<String, String> rg = store.regles();
+                List<Caisse.Saisie> s = store.saisies();
+                List<Caisse.Jour> j = store.jours();
                 result = r;
-                msg = r.tx.size() + " opérations · " + r.unknown.size() + " à vérifier · " + r.dup + " doublons ignorés"
-                        + (added > 0 ? " · " + added + " nouveaux SMS" : "");
-                if (r.scanned == 0) msg = hasSmsPermission()
-                        ? "Aucun SMS Orange Money ou MoMo trouvé. Vérifiez les noms d'expéditeur dans Réglages."
-                        : "Autorisez la lecture des SMS pour commencer.";
+                classements = cl;
+                regles = rg;
+                saisies = s;
+                jours = j;
+                msg = r.tx.size() + " opérations lues dans les SMS" + (added > 0 ? " · " + added + " nouveaux SMS" : "");
+                if (r.scanned == 0 && !hasSmsPermission()) msg = "Autorisez la lecture des SMS pour commencer.";
             } catch (Exception e) {
                 msg = "Erreur de lecture : " + e.getMessage();
             }
@@ -215,7 +239,12 @@ public class MainActivity extends Activity {
         return added;
     }
 
-    // ---------- Interface ----------
+    private Caisse.Bilan computeBilan(long from, long to) {
+        Analyzer.Result r = result != null ? result : new Analyzer.Result();
+        return Caisse.bilan(r, classements, regles, saisies, jours, from, to, agent(Caisse.OM), agent(Caisse.MOMO));
+    }
+
+    // ---------- Briques d'interface ----------
 
     private int dp(float v) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
@@ -266,9 +295,17 @@ public class MainActivity extends Activity {
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         b.setTextColor(primary ? Color.WHITE : INK);
         b.setBackground(box(primary ? ACCENT : SURFACE, primary ? ACCENT : LINE, 10));
-        b.setPadding(dp(8), 0, dp(8), 0);
+        b.setPadding(dp(6), 0, dp(6), 0);
         b.setMinHeight(dp(44));
         b.setOnClickListener(l);
+        return b;
+    }
+
+    private Button small(String label, int color, View.OnClickListener l) {
+        Button b = button(label, false, l);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        b.setTextColor(color);
+        b.setMinHeight(dp(36));
         return b;
     }
 
@@ -277,17 +314,111 @@ public class MainActivity extends Activity {
         b.setTextColor(on ? Color.WHITE : INK);
     }
 
+    private TextView chip(String s, int fg, int bg) {
+        TextView t = text(s, 12, fg, true);
+        t.setBackground(box(bg, 0, 20));
+        t.setPadding(dp(10), dp(3), dp(10), dp(3));
+        return t;
+    }
+
+    private View kv(String k, String v, int color, boolean bold) {
+        LinearLayout row = new LinearLayout(this);
+        row.addView(text(k, 14, bold ? INK : MUTED, bold), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView val = text(v, 14, color, bold);
+        val.setTypeface(Typeface.MONOSPACE, bold ? Typeface.BOLD : 0);
+        row.addView(val);
+        return row;
+    }
+
+    private View kv(String k, String v) { return kv(k, v, INK, false); }
+
+    private TextView tag(String label, int color) {
+        TextView t = text(label, 11, Color.WHITE, true);
+        t.setBackground(box(color, 0, 5));
+        t.setPadding(dp(6), dp(1), dp(6), dp(1));
+        return t;
+    }
+
+    private static int opColor(String mode) {
+        return Caisse.OM.equals(mode) ? OM : Caisse.MOMO.equals(mode) ? MOMO : CASH;
+    }
+
+    private static String opShort(String mode) {
+        return Caisse.OM.equals(mode) ? "OM" : Caisse.MOMO.equals(mode) ? "MoMo" : "Espèces";
+    }
+
+    private static int catColor(String c) {
+        if (c == null) return BAD;
+        switch (c) {
+            case Caisse.VENTE: return GOOD;
+            case Caisse.PAIEMENT: return INK;
+            case Caisse.DON: return PURPLE;
+            case Caisse.PERSONNEL: return WARN;
+            case Caisse.AGENT: return CASH;
+            default: return MUTED;
+        }
+    }
+
+    private TextView catChip(String c, boolean auto) {
+        int fg = catColor(c);
+        TextView t = chip(Caisse.categorieNom(c) + (auto ? " · auto" : ""), fg, c == null ? BAD_BG : BG);
+        return t;
+    }
+
+    private TextView empty(String s) {
+        TextView t = text(s, 14, MUTED, false);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, dp(20), 0, dp(20));
+        return t;
+    }
+
+    private View divider() {
+        View line = new View(this);
+        line.setBackgroundColor(LINE);
+        line.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        return line;
+    }
+
+    private static String when(long ts) {
+        if (ts <= 0) return "date inconnue";
+        return new SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.FRANCE).format(new Date(ts));
+    }
+
+    private static String ecartText(Long e) {
+        return e == null ? "Écart non calculable" : Math.abs(e) <= Analyzer.TOL ? "Écart nul" : "Écart " + (e > 0 ? "+" : "") + SmsParser.fmt(e) + " FCFA";
+    }
+
+    private TextView ecartChip(Long e) {
+        if (e == null) return chip(ecartText(null), MUTED, BG);
+        return Math.abs(e) <= Analyzer.TOL ? chip(ecartText(e), GOOD, GOOD_BG) : chip(ecartText(e), BAD, BAD_BG);
+    }
+
+    private TextView big(String s) {
+        TextView t = text(s, 26, INK, true);
+        t.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        return t;
+    }
+
+    private EditText amountField(String hint) {
+        EditText e = new EditText(this);
+        e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        e.setHint(hint);
+        return e;
+    }
+
+    // ---------- Construction ----------
+
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(BG);
         scroll.setFillViewport(true);
-        LinearLayout root = column(14);
+        LinearLayout root = column(12);
         root.setPadding(dp(16), dp(20), dp(16), dp(32));
         scroll.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
 
         root.addView(text("Carnet Mobile Money", 22, INK, true));
-        root.addView(text("Vos SMS Orange Money et MTN MoMo, en journal de caisse : solde réel, solde théorique et écart.", 14, MUTED, false));
+        root.addView(text("Votre caisse se remplit toute seule avec les SMS Orange Money et MTN MoMo. Vous indiquez seulement s'il s'agit d'une vente, d'un paiement, d'un don ou d'un mouvement personnel.", 14, MUTED, false));
 
         permBox = column(10);
         permBox.setBackground(box(WARN_BG, 0, 14));
@@ -303,11 +434,7 @@ public class MainActivity extends Activity {
         LinearLayout periods = new LinearLayout(this);
         for (int i = 0; i < PERIODS.length; i++) {
             final int p = i;
-            periodButtons[i] = button(PERIODS[i], false, v -> {
-                period = p;
-                Store.savePref(this, "periode", String.valueOf(p));
-                render();
-            });
+            periodButtons[i] = button(PERIODS[i], false, v -> setPeriod(p));
             periodButtons[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             periods.addView(periodButtons[i], weight(i == PERIODS.length - 1));
         }
@@ -319,8 +446,14 @@ public class MainActivity extends Activity {
         status = text("", 13, MUTED, false);
         root.addView(status);
 
-        accounts = column(12);
-        root.addView(accounts, fill());
+        cards = column(12);
+        root.addView(cards, fill());
+
+        LinearLayout day = new LinearLayout(this);
+        day.addView(button("Fond de caisse", false, v -> openFond()), weight(false));
+        day.addView(button("Espèces + / −", false, v -> openEspeces()), weight(false));
+        day.addView(button("Clôturer", false, v -> openCloture()), weight(true));
+        root.addView(day, fill());
 
         LinearLayout actions = new LinearLayout(this);
         actions.addView(button("Actualiser", false, v -> reload(true)), weight(false));
@@ -328,154 +461,236 @@ public class MainActivity extends Activity {
         actions.addView(button("Plus…", false, v -> openMore()), weight(true));
         root.addView(actions, fill());
 
-        LinearLayout tabs = new LinearLayout(this);
-        tabJournal = button("Journal", false, v -> { showCheck = false; render(); });
-        tabCheck = button("À vérifier", false, v -> { showCheck = true; render(); });
-        tabs.addView(tabJournal, weight(false));
-        tabs.addView(tabCheck, weight(true));
-        root.addView(tabs, fill());
+        String[] names = {"Journal", "À classer", "Espèces", "À vérifier"};
+        LinearLayout row1 = new LinearLayout(this), row2 = new LinearLayout(this);
+        for (int i = 0; i < tabs.length; i++) {
+            final int t = i;
+            tabs[i] = button(names[i], false, v -> { tab = t; render(); });
+            tabs[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            (i < 2 ? row1 : row2).addView(tabs[i], weight(i % 2 == 1));
+        }
+        root.addView(row1, fill());
+        root.addView(row2, fill());
 
         list = column(0);
         list.setBackground(box(SURFACE, LINE, 14));
         list.setPadding(dp(14), dp(4), dp(14), dp(4));
         root.addView(list, fill());
 
-        root.addView(text("Un compte par opérateur. Une « rupture de chaîne » signifie qu'un solde ne se déduit pas du précédent : un SMS manque ou a été mal lu. Version 0.2.", 12, MUTED, false));
+        root.addView(text("Les montants viennent des SMS de l'opérateur et ne se modifient pas. Touchez une opération pour changer sa catégorie ou son motif. Version 0.3.", 12, MUTED, false));
     }
+
+    // ---------- Affichage ----------
 
     private void render() {
         for (int i = 0; i < periodButtons.length; i++) select(periodButtons[i], i == period);
-        select(customButton, period == PERIODS.length);
-        customButton.setText(period == PERIODS.length ? "Période : " + periodLabel().toLowerCase(Locale.FRANCE) + " (modifier)" : "Période précise…");
-        accounts.removeAllViews();
+        select(customButton, period == CUSTOM);
+        customButton.setText(period == CUSTOM ? "Période : " + periodLabel().toLowerCase(Locale.FRANCE) + " (modifier)" : "Période précise…");
+        cards.removeAllViews();
         list.removeAllViews();
-        Analyzer.Result r = result;
-        if (r == null) return;
+        if (result == null) return;
         long[] range = range();
+        bilan = computeBilan(range[0], range[1]);
 
-        List<Analyzer.Account> acc = Analyzer.summary(r, range[0], range[1]);
-        if (acc.isEmpty()) accounts.addView(text("Aucun compte détecté pour l'instant.", 14, MUTED, false));
-        for (Analyzer.Account a : acc) accounts.addView(accountCard(a), fill());
+        cards.addView(resultatCard(bilan), fill());
+        for (Caisse.Compte c : bilan.comptes) cards.addView(compteCard(c), fill());
+        cards.addView(especesCard(bilan.especes), fill());
 
-        List<Txn> rows = new ArrayList<>();
-        for (Txn t : r.tx) if (t.date >= range[0] && t.date <= range[1]) rows.add(t);
         List<Txn> unknown = new ArrayList<>();
-        for (Txn u : r.unknown) if (u.smsDate >= range[0] && u.smsDate <= range[1]) unknown.add(u);
+        for (Txn u : result.unknown) if (u.smsDate >= range[0] && u.smsDate <= range[1]) unknown.add(u);
 
-        tabJournal.setText("Journal (" + rows.size() + ")");
-        tabCheck.setText("À vérifier (" + unknown.size() + ")");
-        select(tabJournal, !showCheck);
-        select(tabCheck, showCheck);
+        tabs[TAB_JOURNAL].setText("Journal (" + bilan.lignes.size() + ")");
+        tabs[TAB_CLASSER].setText("À classer (" + bilan.aClasser.size() + ")");
+        tabs[TAB_ESPECES].setText("Espèces (" + bilan.mouvementsEspeces.size() + ")");
+        tabs[TAB_CHECK].setText("À vérifier (" + unknown.size() + ")");
+        for (int i = 0; i < tabs.length; i++) select(tabs[i], i == tab);
+        if (tab != TAB_CLASSER && !bilan.aClasser.isEmpty()) tabs[TAB_CLASSER].setTextColor(BAD);
 
-        if (!showCheck) {
-            if (rows.isEmpty()) list.addView(empty("Aucune opération sur la période."));
-            int n = 0;
-            for (Txn t : rows) {
-                if (n++ >= MAX_ROWS) { list.addView(empty("Seules les " + MAX_ROWS + " dernières opérations sont affichées. L'export Excel contient tout.")); break; }
-                list.addView(txRow(t), fill());
+        switch (tab) {
+            case TAB_JOURNAL: {
+                if (bilan.lignes.isEmpty()) list.addView(empty("Aucune opération sur la période."));
+                int n = 0;
+                for (Caisse.Ligne l : bilan.lignes) {
+                    if (n++ >= MAX_ROWS) { list.addView(empty("Seules les " + MAX_ROWS + " dernières opérations sont affichées. L'export Excel contient tout.")); break; }
+                    list.addView(ligneRow(l, false), fill());
+                }
+                break;
             }
-        } else {
-            if (unknown.isEmpty()) list.addView(empty("Rien à vérifier sur la période."));
-            for (Txn u : unknown) list.addView(unknownRow(u), fill());
+            case TAB_CLASSER: {
+                if (bilan.aClasser.isEmpty()) list.addView(empty("Toutes les opérations de la période sont classées."));
+                else list.addView(text("Un toucher suffit : choisissez la catégorie sous chaque opération.", 12, MUTED, false));
+                int n = 0;
+                for (Caisse.Ligne l : bilan.aClasser) {
+                    if (n++ >= MAX_ROWS) break;
+                    list.addView(ligneRow(l, true), fill());
+                }
+                break;
+            }
+            case TAB_ESPECES:
+                if (bilan.mouvementsEspeces.isEmpty()) list.addView(empty("Aucun mouvement d'espèces. Touchez « Espèces + / − » pour en enregistrer un."));
+                for (Caisse.Saisie s : bilan.mouvementsEspeces) list.addView(especeRow(s), fill());
+                break;
+            default:
+                if (unknown.isEmpty()) list.addView(empty("Rien à vérifier sur la période."));
+                for (Txn u : unknown) list.addView(unknownRow(u), fill());
         }
     }
 
-    private TextView empty(String s) {
-        TextView t = text(s, 14, MUTED, false);
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(0, dp(20), 0, dp(20));
-        return t;
-    }
-
-    private View accountCard(Analyzer.Account a) {
-        int opColor = "OM".equals(a.op) ? OM : MOMO;
+    private LinearLayout cardShell(String title, String subtitle, int color) {
         LinearLayout card = column(8);
         card.setBackground(box(SURFACE, LINE, 14));
         card.setPadding(dp(16), dp(14), dp(16), dp(14));
-
         LinearLayout head = new LinearLayout(this);
         head.setGravity(Gravity.CENTER_VERTICAL);
         View dot = new View(this);
-        dot.setBackground(box(opColor, 0, 6));
+        dot.setBackground(box(color, 0, 6));
         LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(dp(10), dp(10));
         dl.setMarginEnd(dp(8));
         head.addView(dot, dl);
-        head.addView(text(Txn.opName(a.op), 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        head.addView(text(a.count + " opér.", 12, MUTED, false));
+        head.addView(text(title, 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(text(subtitle, 12, MUTED, false));
         card.addView(head, fill());
-
-        card.addView(text("SOLDE RÉEL (DERNIER SMS)", 11, MUTED, true));
-        TextView big = text(SmsParser.fmt(a.reel) + " FCFA", 26, INK, true);
-        big.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        card.addView(big);
-
-        card.addView(kv("Solde d'ouverture", SmsParser.fmt(a.ouverture)));
-        card.addView(kv("Entrées", "+" + SmsParser.fmt(a.entrees)));
-        card.addView(kv("Sorties", "−" + SmsParser.fmt(a.sorties)));
-        card.addView(kv("Frais et taxes", "−" + SmsParser.fmt(a.frais)));
-        card.addView(kv("Solde théorique", SmsParser.fmt(a.theo)));
-
-        TextView chip;
-        if (a.ecart == null) chip = chip("Écart non calculable", MUTED, BG);
-        else if (Math.abs(a.ecart) <= Analyzer.TOL) chip = chip("Écart nul", GOOD, GOOD_BG);
-        else chip = chip("Écart " + (a.ecart > 0 ? "+" : "") + SmsParser.fmt(a.ecart) + " FCFA", BAD, BAD_BG);
-        LinearLayout foot = new LinearLayout(this);
-        foot.setGravity(Gravity.CENTER_VERTICAL);
-        foot.addView(chip);
-        foot.addView(text(a.breaks == 0 ? "  Chaîne des soldes complète" : "  " + a.breaks + " alerte(s) : voir le journal", 12, a.breaks == 0 ? MUTED : BAD, false));
-        card.addView(foot);
-        card.addView(text(a.count == 0 ? "Aucune opération sur la période." : "Du " + when(a.from) + " au " + when(a.to), 12, MUTED, false));
         return card;
     }
 
-    private View kv(String k, String v) {
-        LinearLayout row = new LinearLayout(this);
-        row.addView(text(k, 14, MUTED, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView val = text(v, 14, INK, false);
-        val.setTypeface(Typeface.MONOSPACE);
-        row.addView(val);
-        return row;
+    private View resultatCard(Caisse.Bilan b) {
+        LinearLayout card = cardShell("Caisse de la période", periodLabel(), ACCENT);
+        card.addView(text("RÉSULTAT (VENTES − PAIEMENTS − FRAIS)", 11, MUTED, true));
+        TextView res = big((b.resultat >= 0 ? "" : "−") + SmsParser.fmt(Math.abs(b.resultat)) + " FCFA");
+        res.setTextColor(b.resultat >= 0 ? GOOD : BAD);
+        card.addView(res);
+        Caisse.Total v = b.total(Caisse.VENTE), p = b.total(Caisse.PAIEMENT), d = b.total(Caisse.DON), pe = b.total(Caisse.PERSONNEL), a = b.total(Caisse.AUTRE);
+        card.addView(kv("Ventes", "+" + SmsParser.fmt(v.entrees - v.sorties), GOOD, false));
+        card.addView(kv("Paiements", "−" + SmsParser.fmt(p.sorties - p.entrees)));
+        card.addView(kv("Frais opérateur", "−" + SmsParser.fmt(b.frais)));
+        card.addView(divider());
+        card.addView(kv("Dons reçus / donnés", "+" + SmsParser.fmt(d.entrees) + " / −" + SmsParser.fmt(d.sorties), PURPLE, false));
+        card.addView(kv("Personnel entrées / sorties", "+" + SmsParser.fmt(pe.entrees) + " / −" + SmsParser.fmt(pe.sorties), WARN, false));
+        if (a.count > 0) card.addView(kv("Autre entrées / sorties", "+" + SmsParser.fmt(a.entrees) + " / −" + SmsParser.fmt(a.sorties)));
+        if (!b.aClasser.isEmpty()) {
+            Caisse.Total x = b.total(null);
+            LinearLayout warn = new LinearLayout(this);
+            warn.setGravity(Gravity.CENTER_VERTICAL);
+            warn.addView(chip(b.aClasser.size() + " à classer : +" + SmsParser.fmt(x.entrees) + " / −" + SmsParser.fmt(x.sorties), BAD, BAD_BG));
+            card.addView(warn);
+            card.addView(text("Le résultat est provisoire tant que des opérations restent à classer.", 12, BAD, false));
+        } else if (!b.lignes.isEmpty()) {
+            LinearLayout ok = new LinearLayout(this);
+            ok.addView(chip("Tout est classé", GOOD, GOOD_BG));
+            card.addView(ok);
+        }
+        return card;
     }
 
-    private TextView chip(String s, int fg, int bg) {
-        TextView t = text(s, 12, fg, true);
-        t.setBackground(box(bg, 0, 20));
-        t.setPadding(dp(10), dp(3), dp(10), dp(3));
-        return t;
+    private View compteCard(Caisse.Compte c) {
+        LinearLayout card = cardShell(Caisse.modeNom(c.op), c.agent ? "compte agent" : (c.sms != null ? c.sms.count + " opér." : ""), opColor(c.op));
+        card.addView(text("SOLDE RÉEL (DERNIER SMS)", 11, MUTED, true));
+        card.addView(big(SmsParser.fmt(c.reel) + " FCFA"));
+        card.addView(kv("Solde d'ouverture", SmsParser.fmt(c.ouverture)));
+        card.addView(kv("Entrées", "+" + SmsParser.fmt(c.entrees)));
+        card.addView(kv("Sorties", "−" + SmsParser.fmt(c.sorties)));
+        card.addView(kv("Frais", "−" + SmsParser.fmt(c.frais)));
+        card.addView(kv("Solde théorique", SmsParser.fmt(c.theo)));
+        LinearLayout foot = new LinearLayout(this);
+        foot.setGravity(Gravity.CENTER_VERTICAL);
+        foot.addView(ecartChip(c.ecart));
+        card.addView(foot);
+        if (c.alertesSms > 0) card.addView(text(c.alertesSms + " SMS manquant(s) : voir les alertes dans le journal.", 12, BAD, true));
+        if (c.aClasser > 0) card.addView(text(c.aClasser + " opération(s) à classer.", 12, BAD, false));
+        return card;
     }
 
-    private View txRow(Txn t) {
+    private View especesCard(Caisse.Especes e) {
+        LinearLayout card = cardShell("Espèces", e.compte != null ? "clôturée" : "en cours", CASH);
+        card.addView(text(e.compte != null ? "MONTANT COMPTÉ" : "MONTANT THÉORIQUE", 11, MUTED, true));
+        card.addView(big(SmsParser.fmt(e.compte != null ? e.compte : e.theo) + " FCFA"));
+        card.addView(kv("Ouverture", SmsParser.fmt(e.ouverture)));
+        if (!e.origineOuverture.isEmpty()) card.addView(text(e.origineOuverture, 12, MUTED, false));
+        card.addView(kv("Entrées saisies", "+" + SmsParser.fmt(e.entrees)));
+        card.addView(kv("Sorties saisies", "−" + SmsParser.fmt(e.sorties)));
+        if (agent(Caisse.OM) || agent(Caisse.MOMO)) {
+            card.addView(kv("Dépôts clients (agent)", "+" + SmsParser.fmt(e.depotsClients)));
+            card.addView(kv("Retraits clients (agent)", "−" + SmsParser.fmt(e.retraitsClients)));
+        }
+        card.addView(kv("Théorique", SmsParser.fmt(e.theo)));
+        card.addView(kv("Compté", SmsParser.fmt(e.compte)));
+        LinearLayout foot = new LinearLayout(this);
+        foot.setGravity(Gravity.CENTER_VERTICAL);
+        if (e.ouverture == null) foot.addView(chip("Fond de caisse non saisi", WARN, WARN_BG));
+        else if (e.compte == null) foot.addView(chip("Pas encore clôturée", WARN, WARN_BG));
+        else foot.addView(ecartChip(e.ecart));
+        card.addView(foot);
+        return card;
+    }
+
+    /** Une ligne de caisse issue d'un SMS ; quick = boutons de classement directement sous la ligne. */
+    private View ligneRow(Caisse.Ligne l, boolean quick) {
+        Txn t = l.sms;
         LinearLayout row = column(3);
         row.setPadding(0, dp(10), 0, dp(10));
 
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        TextView tag = text("OM".equals(t.op) ? "OM" : "MoMo", 11, Color.WHITE, true);
-        tag.setBackground(box("OM".equals(t.op) ? OM : MOMO, 0, 5));
-        tag.setPadding(dp(6), dp(1), dp(6), dp(1));
         LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         tl.setMarginEnd(dp(8));
-        top.addView(tag, tl);
+        top.addView(tag(opShort(t.op), opColor(t.op)), tl);
         top.addView(text(t.typeLabel(), 15, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        String amount = t.isBalanceCheck() ? SmsParser.fmt(t.solde) : (t.sens > 0 ? "+" : "−") + SmsParser.fmt(t.montant);
-        TextView amt = text(amount, 15, t.isBalanceCheck() ? MUTED : (t.sens > 0 ? GOOD : INK), true);
+        TextView amt = text((t.sens > 0 ? "+" : "−") + SmsParser.fmt(t.montant), 15, t.sens > 0 ? GOOD : INK, true);
         amt.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         top.addView(amt);
         row.addView(top, fill());
 
-        if (!t.isBalanceCheck()) {
-            String who = (t.nom != null ? t.nom : "") + (t.numero != null ? (t.nom != null ? " · " : "") + t.numero : "");
-            if (!who.isEmpty()) row.addView(text(who, 13, MUTED, false));
+        String who = (t.nom != null ? t.nom : "") + (t.numero != null ? (t.nom != null ? " · " : "") + t.numero : "");
+        if (!who.isEmpty()) row.addView(text(who, 13, MUTED, false));
+        row.addView(text(when(t.date) + (t.txnId != null ? " · ID " + t.txnId : "") + (t.frais > 0 ? " · frais " + SmsParser.fmt(t.frais) : "")
+                + " · solde " + SmsParser.fmt(t.solde != null ? t.solde : t.apres), 12, MUTED, false));
+
+        LinearLayout cat = new LinearLayout(this);
+        cat.setGravity(Gravity.CENTER_VERTICAL);
+        cat.addView(catChip(l.categorie, l.auto));
+        if (!l.motif.isEmpty()) {
+            TextView m = text("  " + l.motif, 13, INK, false);
+            cat.addView(m, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         }
-        String meta = when(t.date) + (t.txnId != null ? " · ID " + t.txnId : "")
-                + (t.frais > 0 ? " · frais " + SmsParser.fmt(t.frais) : "")
-                + (t.isBalanceCheck() ? "" : " · solde " + SmsParser.fmt(t.solde != null ? t.solde : t.apres));
-        row.addView(text(meta, 12, MUTED, false));
-        if (t.motif != null) row.addView(text("Motif : " + t.motif, 12, MUTED, false));
-        for (String f : t.flags) row.addView(text(f.substring(1), 12, f.startsWith("!") ? BAD : WARN, true));
-        View line = new View(this);
-        line.setBackgroundColor(LINE);
-        row.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        row.addView(cat, fill());
+        for (String f : t.flags) if (f.startsWith("!")) row.addView(text(f.substring(1), 12, BAD, true));
+
+        if (quick) {
+            LinearLayout q = new LinearLayout(this);
+            for (int i = 0; i < Caisse.CATEGORIES.length; i++) {
+                final String c = Caisse.CATEGORIES[i];
+                q.addView(small(COURT[i], catColor(c), v -> classer(t, c, l.motif, false)), weight(i == Caisse.CATEGORIES.length - 1));
+            }
+            row.addView(q, fill());
+        }
+        row.setOnClickListener(v -> openClassement(l));
+        row.addView(divider());
+        return row;
+    }
+
+    private View especeRow(Caisse.Saisie s) {
+        LinearLayout row = column(3);
+        row.setPadding(0, dp(10), 0, dp(10));
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tl.setMarginEnd(dp(8));
+        top.addView(tag("Espèces", CASH), tl);
+        top.addView(text(s.libelle.isEmpty() ? (s.sens > 0 ? "Entrée d'espèces" : "Sortie d'espèces") : s.libelle, 15, s.annule ? MUTED : INK, true),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView amt = text((s.sens > 0 ? "+" : "−") + SmsParser.fmt(s.montant), 15, s.annule ? MUTED : (s.sens > 0 ? GOOD : INK), true);
+        amt.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        top.addView(amt);
+        row.addView(top, fill());
+        row.addView(text(when(s.date), 12, MUTED, false));
+        LinearLayout act = new LinearLayout(this);
+        act.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout chipBox = new LinearLayout(this);
+        chipBox.addView(s.annule ? chip("Annulée", MUTED, BG) : catChip(s.categorie, false));
+        act.addView(chipBox, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (!s.annule) act.addView(small("Annuler", BAD, v -> confirmAnnuler(s)));
+        row.addView(act, fill());
+        row.addView(divider());
         return row;
     }
 
@@ -492,14 +707,251 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private static String when(long ts) {
-        if (ts <= 0) return "date inconnue";
-        return new SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.FRANCE).format(new Date(ts));
+    // ---------- Classement ----------
+
+    private void classer(Txn t, String categorie, String motif, boolean toujours) {
+        final String key = Caisse.cle(t);
+        final String numero = t.numero;
+        io.execute(() -> {
+            Store store = Store.get(this);
+            store.classer(key, categorie, motif);
+            if (toujours && numero != null) store.regle(numero, categorie);
+            Map<String, Caisse.Classement> cl = store.classements();
+            Map<String, String> rg = store.regles();
+            runOnUiThread(() -> {
+                classements = cl;
+                regles = rg;
+                render();
+            });
+        });
+    }
+
+    /** Montant affiché mais verrouillé ; catégorie et motif modifiables. */
+    private void openClassement(Caisse.Ligne l) {
+        Txn t = l.sms;
+        LinearLayout form = column(10);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        TextView amt = big((t.sens > 0 ? "+" : "−") + SmsParser.fmt(t.montant) + " FCFA");
+        amt.setTextColor(t.sens > 0 ? GOOD : INK);
+        form.addView(amt);
+        form.addView(text(Txn.opName(t.op) + " · " + t.typeLabel() + " · " + when(t.date)
+                + (t.nom != null ? "\n" + t.nom : "") + (t.numero != null ? " · " + t.numero : "")
+                + "\nMontant lu dans le SMS : non modifiable.", 13, MUTED, false));
+
+        final String[] choix = {l.categorie != null && !Caisse.AGENT.equals(l.categorie) ? l.categorie : null};
+        form.addView(text("Catégorie", 13, MUTED, false));
+        LinearLayout r1 = new LinearLayout(this), r2 = new LinearLayout(this);
+        Button[] cb = new Button[Caisse.CATEGORIES.length];
+        for (int i = 0; i < cb.length; i++) {
+            cb[i] = button(COURT[i], false, null);
+            cb[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            (i < 3 ? r1 : r2).addView(cb[i], weight(i == 2 || i == cb.length - 1));
+        }
+        Runnable paint = () -> { for (int i = 0; i < cb.length; i++) select(cb[i], Caisse.CATEGORIES[i].equals(choix[0])); };
+        for (int i = 0; i < cb.length; i++) {
+            final String c = Caisse.CATEGORIES[i];
+            cb[i].setOnClickListener(v -> { choix[0] = c; paint.run(); });
+        }
+        paint.run();
+        form.addView(r1, fill());
+        form.addView(r2, fill());
+
+        form.addView(text("Motif", 13, MUTED, false));
+        EditText motif = new EditText(this);
+        motif.setInputType(InputType.TYPE_CLASS_TEXT);
+        motif.setHint("ex. Vente de 2 sacs de riz");
+        motif.setText(l.motif);
+        form.addView(motif, fill());
+
+        CheckBox toujours = new CheckBox(this);
+        if (t.numero != null) {
+            String who = t.nom != null ? t.nom : t.numero;
+            toujours.setText("Toujours classer " + who + " dans cette catégorie");
+            toujours.setChecked(regles.containsKey(t.numero));
+            form.addView(toujours, fill());
+        }
+
+        ScrollView sv = new ScrollView(this);
+        sv.addView(form, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle("Classer l'opération")
+                .setView(sv)
+                .setPositiveButton("Enregistrer", (d, w) -> {
+                    boolean always = t.numero != null && toujours.isChecked();
+                    if (!always && t.numero != null && regles.containsKey(t.numero)) {
+                        final String numero = t.numero;
+                        io.execute(() -> Store.get(this).regle(numero, null));
+                    }
+                    classer(t, choix[0], motif.getText().toString().trim(), always && choix[0] != null);
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    // ---------- Espèces ----------
+
+    private void openEspeces() {
+        LinearLayout form = column(10);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        final int[] sens = {1};
+        final String[] cat = {Caisse.VENTE};
+
+        LinearLayout sensRow = new LinearLayout(this);
+        Button in = button("Entrée", false, null), out = button("Sortie", false, null);
+        sensRow.addView(in, weight(false));
+        sensRow.addView(out, weight(true));
+        form.addView(sensRow, fill());
+
+        form.addView(text("Montant (FCFA)", 13, MUTED, false));
+        EditText montant = amountField("ex. 15000");
+        form.addView(montant, fill());
+
+        form.addView(text("Catégorie", 13, MUTED, false));
+        LinearLayout r1 = new LinearLayout(this), r2 = new LinearLayout(this);
+        Button[] cb = new Button[Caisse.CATEGORIES.length];
+        for (int i = 0; i < cb.length; i++) {
+            cb[i] = button(COURT[i], false, null);
+            cb[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            (i < 3 ? r1 : r2).addView(cb[i], weight(i == 2 || i == cb.length - 1));
+        }
+        Runnable paint = () -> {
+            select(in, sens[0] > 0);
+            select(out, sens[0] < 0);
+            for (int i = 0; i < cb.length; i++) select(cb[i], Caisse.CATEGORIES[i].equals(cat[0]));
+        };
+        in.setOnClickListener(v -> { sens[0] = 1; if (Caisse.PAIEMENT.equals(cat[0])) cat[0] = Caisse.VENTE; paint.run(); });
+        out.setOnClickListener(v -> { sens[0] = -1; if (Caisse.VENTE.equals(cat[0])) cat[0] = Caisse.PAIEMENT; paint.run(); });
+        for (int i = 0; i < cb.length; i++) {
+            final String c = Caisse.CATEGORIES[i];
+            cb[i].setOnClickListener(v -> { cat[0] = c; paint.run(); });
+        }
+        paint.run();
+        form.addView(r1, fill());
+        form.addView(r2, fill());
+
+        EditText libelle = new EditText(this);
+        libelle.setInputType(InputType.TYPE_CLASS_TEXT);
+        libelle.setHint("Motif (facultatif)");
+        form.addView(libelle, fill());
+
+        new AlertDialog.Builder(this)
+                .setTitle("Mouvement d'espèces")
+                .setView(form)
+                .setPositiveButton("Enregistrer", (d, w) -> {
+                    Long cents = SmsParser.money(montant.getText().toString());
+                    if (cents == null || cents <= 0) {
+                        Toast.makeText(this, "Montant invalide : mouvement non enregistré.", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    Caisse.Saisie s = new Caisse.Saisie();
+                    s.date = System.currentTimeMillis();
+                    s.mode = Caisse.ESPECES;
+                    s.sens = sens[0];
+                    s.montant = cents;
+                    s.categorie = cat[0];
+                    s.libelle = libelle.getText().toString().trim();
+                    io.execute(() -> {
+                        Store.get(this).addSaisie(s);
+                        runOnUiThread(() -> {
+                            Toast.makeText(this, (s.sens > 0 ? "Entrée" : "Sortie") + " d'espèces de " + SmsParser.fmt(cents) + " FCFA enregistrée.", Toast.LENGTH_SHORT).show();
+                            reload(false);
+                        });
+                    });
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void confirmAnnuler(Caisse.Saisie s) {
+        new AlertDialog.Builder(this)
+                .setTitle("Annuler ce mouvement ?")
+                .setMessage((s.sens > 0 ? "+" : "−") + SmsParser.fmt(s.montant) + " FCFA en espèces, " + when(s.date)
+                        + ". Il restera visible, marqué « Annulé », et ne comptera plus dans la caisse.")
+                .setPositiveButton("Annuler le mouvement", (d, w) -> io.execute(() -> {
+                    Store.get(this).annulerSaisie(s.id);
+                    runOnUiThread(() -> reload(false));
+                }))
+                .setNegativeButton("Garder", null)
+                .show();
+    }
+
+    // ---------- Fond de caisse et clôture ----------
+
+    private void openFond() {
+        String today = Caisse.jourDe(System.currentTimeMillis());
+        Caisse.Jour j = null;
+        Long last = null;
+        for (Caisse.Jour x : jours) {
+            if (x.jour.equals(today)) j = x;
+            if (x.jour.compareTo(today) < 0 && x.compte != null) last = x.compte;
+        }
+        LinearLayout form = column(10);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        form.addView(text("Espèces présentes dans la caisse à l'ouverture d'aujourd'hui." + (last != null ? " Comptage de la dernière clôture : " + SmsParser.fmt(last) + " FCFA." : ""), 13, MUTED, false));
+        EditText fond = amountField("Montant en FCFA");
+        if (j != null && j.fond != null) fond.setText(SmsParser.plain(j.fond));
+        else if (last != null) fond.setText(SmsParser.plain(last));
+        form.addView(fond, fill());
+        new AlertDialog.Builder(this)
+                .setTitle("Fond de caisse")
+                .setView(form)
+                .setPositiveButton("Enregistrer", (d, w) -> {
+                    Long cents = SmsParser.money(fond.getText().toString());
+                    if (cents == null) { Toast.makeText(this, "Montant invalide.", Toast.LENGTH_LONG).show(); return; }
+                    io.execute(() -> {
+                        Store.get(this).setFond(today, cents);
+                        runOnUiThread(() -> reload(false));
+                    });
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void openCloture() {
+        String today = Caisse.jourDe(System.currentTimeMillis());
+        Caisse.Bilan b = computeBilan(Caisse.debutJour(today), Long.MAX_VALUE);
+        Caisse.Especes e = b.especes;
+        LinearLayout form = column(10);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        form.addView(kv("Résultat du jour", (b.resultat >= 0 ? "+" : "−") + SmsParser.fmt(Math.abs(b.resultat)) + " FCFA", b.resultat >= 0 ? GOOD : BAD, true));
+        form.addView(kv("Espèces théoriques", SmsParser.fmt(e.theo) + " FCFA"));
+        if (!b.aClasser.isEmpty()) form.addView(text(b.aClasser.size() + " opération(s) d'aujourd'hui restent à classer (onglet « À classer »).", 13, BAD, true));
+        if (e.ouverture == null) form.addView(text("Le fond de caisse d'aujourd'hui n'a pas été saisi : l'écart espèces ne pourra pas être calculé.", 13, WARN, true));
+        form.addView(text("Espèces comptées dans la caisse (FCFA)", 13, MUTED, false));
+        EditText compte = amountField("Montant compté");
+        form.addView(compte, fill());
+        EditText note = new EditText(this);
+        note.setInputType(InputType.TYPE_CLASS_TEXT);
+        note.setHint("Note (facultatif)");
+        form.addView(note, fill());
+        new AlertDialog.Builder(this)
+                .setTitle("Clôturer le " + Caisse.affiche(today))
+                .setView(form)
+                .setPositiveButton("Clôturer", (d, w) -> {
+                    Long cents = SmsParser.money(compte.getText().toString());
+                    if (cents == null) { Toast.makeText(this, "Montant compté invalide : clôture non enregistrée.", Toast.LENGTH_LONG).show(); return; }
+                    String n = note.getText().toString().trim();
+                    io.execute(() -> {
+                        Store.get(this).cloturer(today, cents, n, System.currentTimeMillis());
+                        runOnUiThread(() -> {
+                            setPeriod(0);
+                            reload(false);
+                            String ecart = e.theo == null ? "écart espèces non calculable" : ecartText(cents - e.theo).toLowerCase(Locale.FRANCE) + " en espèces";
+                            new AlertDialog.Builder(this)
+                                    .setTitle("Journée clôturée")
+                                    .setMessage("Comptage enregistré : " + SmsParser.fmt(cents) + " FCFA, " + ecart + ". Exporter le rapport Excel du jour ?")
+                                    .setPositiveButton("Exporter", (d2, w2) -> startExport(REQ_XLSX))
+                                    .setNegativeButton("Plus tard", null)
+                                    .show();
+                        });
+                    });
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
     }
 
     // ---------- Période précise ----------
 
-    /** Demande la date de début, puis la date de fin. */
     private void pickRange() {
         Calendar start = Calendar.getInstance();
         if (customFrom > 0) start.setTimeInMillis(customFrom);
@@ -527,11 +979,9 @@ public class MainActivity extends Activity {
                 }
                 customFrom = f;
                 customTo = to;
-                period = PERIODS.length;
                 Store.savePref(this, "debut", String.valueOf(customFrom));
                 Store.savePref(this, "fin", String.valueOf(customTo));
-                Store.savePref(this, "periode", String.valueOf(period));
-                render();
+                setPeriod(CUSTOM);
             }, end.get(Calendar.YEAR), end.get(Calendar.MONTH), end.get(Calendar.DAY_OF_MONTH));
             second.setTitle("Date de fin");
             second.show();
@@ -556,6 +1006,18 @@ public class MainActivity extends Activity {
     private void openSettings() {
         LinearLayout form = column(10);
         form.setPadding(dp(20), dp(8), dp(20), 0);
+
+        form.addView(text("Type de compte", 14, INK, true));
+        CheckBox agentOm = new CheckBox(this);
+        agentOm.setText("Orange Money : compte agent (dépôts et retraits clients)");
+        agentOm.setChecked(agent(Caisse.OM));
+        form.addView(agentOm, fill());
+        CheckBox agentMomo = new CheckBox(this);
+        agentMomo.setText("MTN MoMo : compte agent (dépôts et retraits clients)");
+        agentMomo.setChecked(agent(Caisse.MOMO));
+        form.addView(agentMomo, fill());
+        form.addView(text("En mode agent, les dépôts et retraits clients sont classés automatiquement et font bouger la caisse espèces.", 12, MUTED, false));
+
         String detected = Store.pref(this, "ownerOmAuto", "");
         form.addView(text("Mon numéro Orange Money (sert à savoir si un transfert est reçu ou envoyé)" + (detected.isEmpty() ? "" : ". Détecté : " + detected), 13, MUTED, false));
         EditText owner = new EditText(this);
@@ -563,6 +1025,7 @@ public class MainActivity extends Activity {
         owner.setHint(detected.isEmpty() ? "6XXXXXXXX" : detected);
         owner.setText(Store.pref(this, "ownerOm", ""));
         form.addView(owner, fill());
+
         form.addView(text("Expéditeurs Orange Money (séparés par des virgules)", 13, MUTED, false));
         EditText om = new EditText(this);
         om.setInputType(InputType.TYPE_CLASS_TEXT);
@@ -577,23 +1040,28 @@ public class MainActivity extends Activity {
         auto.setText("Lire aussi les SMS d'autres expéditeurs qui parlent d'Orange Money ou de MoMo");
         auto.setChecked(Store.prefBool(this, "auto", false));
         form.addView(auto, fill());
+        form.addView(text(regles.size() + " contact(s) classé(s) automatiquement. Pour retirer une règle, ouvrez une opération du contact et décochez « Toujours classer ».", 12, MUTED, false));
 
+        ScrollView sv = new ScrollView(this);
+        sv.addView(form, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         new AlertDialog.Builder(this)
                 .setTitle("Réglages")
-                .setView(form)
+                .setView(sv)
                 .setPositiveButton("Enregistrer", (d, w) -> {
                     Store.saveConfig(this, om.getText().toString(), momo.getText().toString(), auto.isChecked(), owner.getText().toString().trim());
+                    Store.saveFlag(this, "agent" + Caisse.OM, agentOm.isChecked());
+                    Store.saveFlag(this, "agent" + Caisse.MOMO, agentMomo.isChecked());
                     reload(true);
                 })
-                .setNeutralButton("Effacer l'historique", (d, w) -> confirmClear())
+                .setNeutralButton("Effacer les SMS", (d, w) -> confirmClear())
                 .setNegativeButton("Annuler", null)
                 .show();
     }
 
     private void confirmClear() {
         new AlertDialog.Builder(this)
-                .setTitle("Effacer l'historique ?")
-                .setMessage("La copie locale des SMS mobile money sera effacée, puis relue depuis votre messagerie. Les SMS déjà supprimés de la messagerie seront perdus.")
+                .setTitle("Effacer la copie des SMS ?")
+                .setMessage("La copie locale des SMS mobile money sera effacée, puis relue depuis votre messagerie. Les SMS déjà supprimés de la messagerie seront perdus. Vos catégories, motifs, espèces et clôtures sont conservés.")
                 .setPositiveButton("Effacer", (d, w) -> io.execute(() -> {
                     Store.get(this).clear();
                     runOnUiThread(() -> reload(true));
@@ -605,7 +1073,7 @@ public class MainActivity extends Activity {
     // ---------- Exports ----------
 
     private void startExport(int kind) {
-        if (result == null || (kind != REQ_SMS && result.tx.isEmpty())) {
+        if (result == null) {
             Toast.makeText(this, "Rien à exporter pour l'instant.", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -614,7 +1082,7 @@ public class MainActivity extends Activity {
         i.addCategory(Intent.CATEGORY_OPENABLE);
         if (kind == REQ_XLSX) {
             i.setType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-            i.putExtra(Intent.EXTRA_TITLE, "carnet-mobile-money-" + day + ".xlsx");
+            i.putExtra(Intent.EXTRA_TITLE, "caisse-mobile-money-" + day + ".xlsx");
         } else if (kind == REQ_CSV) {
             i.setType("text/csv");
             i.putExtra(Intent.EXTRA_TITLE, "journal-mobile-money-" + day + ".csv");
@@ -634,11 +1102,12 @@ public class MainActivity extends Activity {
         final Analyzer.Result r = result;
         final long[] range = range();
         final String label = periodLabel();
+        final Caisse.Bilan b = computeBilan(range[0], range[1]);
         io.execute(() -> {
             String msg;
             try (OutputStream os = getContentResolver().openOutputStream(uri)) {
                 if (code == REQ_XLSX) {
-                    os.write(Exporter.xlsx(r, range[0], range[1], label));
+                    os.write(Exporter.xlsx(r, b, range[0], range[1], label, System.currentTimeMillis()));
                     msg = "Classeur Excel enregistré : " + label + ".";
                 } else if (code == REQ_CSV) {
                     os.write(Exporter.csv(r, range[0], range[1]).getBytes(StandardCharsets.UTF_8));

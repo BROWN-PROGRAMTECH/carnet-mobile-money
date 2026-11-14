@@ -2,6 +2,20 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Nouveautés de la version 0.3 : la caisse automatique
+
+- **La caisse se remplit toute seule** : chaque opération lue dans un SMS Orange Money ou MoMo devient une ligne de caisse. Le montant vient du SMS et **ne se modifie pas**.
+- **Catégorie** pour chaque ligne : Vente, Paiement, Don, Personnel ou Autre. Tant qu'elle n'est pas choisie, la ligne reste « À classer ».
+- **Onglet « À classer »** : un toucher sur la catégorie sous chaque opération suffit.
+- **Motif ajustable** : touchez une opération pour modifier son motif (prérempli avec le message du SMS quand il existe).
+- **« Toujours classer ce contact ainsi »** : un fournisseur, un client régulier ou un proche est classé automatiquement les fois suivantes.
+- **Caisse de la période** : ventes − paiements − frais = résultat ; dons et mouvements personnels affichés à part ; alerte tant qu'il reste des opérations à classer.
+- **Espèces** (sans SMS, donc saisies à la main) : fond de caisse, entrées et sorties avec catégorie, comptage à la clôture, écart. Un mouvement s'annule mais ne s'efface pas.
+- **Mode agent** (Réglages, par opérateur) : dépôts et retraits clients classés automatiquement, avec effet sur les espèces.
+- **Excel** : onglets Synthèse (totaux par catégorie, résultat, comptes, espèces), Journal de caisse (avec Catégorie et Motif), À classer, Espèces, À vérifier.
+
+Limite connue : les formats de SMS des comptes agents n'ont pas encore été vus. Envoyez des SMS de dépôt et de retrait clients anonymisés (« Plus… → Exporter les SMS anonymisés ») pour fiabiliser le mode agent.
+
 ## Nouveautés de la version 0.2
 
 - Un seul compte par opérateur : l'identifiant de SIM d'Android, qui change avec le téléphone ou la carte, n'éclate plus un compte en plusieurs « SIM ».

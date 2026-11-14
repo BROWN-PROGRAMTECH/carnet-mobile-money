@@ -7,6 +7,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /** Contenu des exports : classeur Excel (par défaut), CSV, SMS anonymisés. Classe Java pure. */
 public final class Exporter {
@@ -33,35 +34,68 @@ public final class Exporter {
         return rows;
     }
 
-    public static byte[] xlsx(Analyzer.Result r, long from, long to, String periodLabel) throws IOException {
-        List<Analyzer.Account> acc = Analyzer.summary(r, from, to);
+    /** Classeur de caisse : Synthèse, Journal de caisse, À classer, Espèces, À vérifier. */
+    public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now) throws IOException {
         XlsxWriter w = new XlsxWriter();
 
-        XlsxWriter.Sheet s = w.sheet("Synthèse", 22, 14, 14, 14, 14, 14, 16, 16, 14, 12).noHeader();
-        s.row("**Carnet Mobile Money : synthèse");
+        XlsxWriter.Sheet s = w.sheet("Synthèse", 28, 16, 16, 12, 16, 16, 14, 14, 14).noHeader();
+        s.row("**Carnet Mobile Money : rapport de caisse");
         s.row("Période", periodLabel);
-        s.row("Exporté le", new Date());
+        s.row("Exporté le", new Date(now));
         if (r.ownerOm != null && !r.ownerOm.isEmpty()) s.row("Titulaire Orange Money", r.ownerOm);
         s.row();
-        s.row("**Compte", "**Opérations", "**Solde d'ouverture", "**Entrées", "**Sorties", "**Frais et taxes",
-                "**Solde théorique", "**Solde réel (SMS)", "**Écart", "**Alertes");
-        for (Analyzer.Account a : acc)
-            s.row(Txn.opName(a.op), a.count, fcfa(a.ouverture), fcfa(a.entrees), fcfa(a.sorties), fcfa(a.frais),
-                    fcfa(a.theo), fcfa(a.reel), fcfa(a.ecart), a.breaks);
+        s.row("**Catégorie", "**Entrées (FCFA)", "**Sorties (FCFA)", "**Opérations");
+        for (Map.Entry<String, Caisse.Total> e : bilan.totaux.entrySet()) {
+            Caisse.Total t = e.getValue();
+            if (t.count == 0 && e.getKey() == null) continue;
+            s.row(Caisse.categorieNom(e.getKey()), fcfa(t.entrees), fcfa(t.sorties), t.count);
+        }
+        s.row("Frais opérateur", null, fcfa(bilan.frais));
+        s.row("**Résultat (ventes − paiements − frais)", fcfa(bilan.resultat));
+        if (!bilan.aClasser.isEmpty()) s.row("**Attention", bilan.aClasser.size() + " opération(s) encore à classer : le résultat est provisoire.");
+        s.row();
+        s.row("**Comptes", "**Solde d'ouverture", "**Entrées", "**Sorties", "**Frais", "**Solde théorique", "**Solde réel", "**Écart", "**À classer");
+        for (Caisse.Compte c : bilan.comptes)
+            s.row(Txn.opName(c.op) + (c.agent ? " (agent)" : ""), fcfa(c.ouverture), fcfa(c.entrees), fcfa(c.sorties), fcfa(c.frais),
+                    fcfa(c.theo), fcfa(c.reel), fcfa(c.ecart), c.aClasser);
+        Caisse.Especes e = bilan.especes;
+        s.row("Espèces", fcfa(e.ouverture), fcfa(e.entrees + e.depotsClients), fcfa(e.sorties + e.retraitsClients), null,
+                fcfa(e.theo), fcfa(e.compte), fcfa(e.ecart));
+        if (!e.origineOuverture.isEmpty()) s.row("Ouverture des espèces", e.origineOuverture);
         s.row();
         s.row("**Comment lire");
-        s.row("Solde d'ouverture", "Solde du compte juste avant la période, d'après le dernier SMS connu.");
-        s.row("Solde théorique", "Ouverture + entrées − sorties − frais, d'après les SMS de la période.");
-        s.row("Solde réel", "Dernier solde annoncé par l'opérateur dans la période.");
-        s.row("Écart", "Réel − théorique. Un écart non nul signale un SMS manquant ou mal lu : voir la colonne Contrôle du journal.");
+        s.row("Montants", "Lus dans les SMS de l'opérateur, non modifiables. Seuls la catégorie et le motif sont déclarés par l'utilisateur.");
+        s.row("Solde théorique", "Comptes OM et MoMo : ouverture + entrées − sorties − frais d'après les SMS. Un écart signale un SMS manquant.");
+        s.row("Espèces", "Fond de caisse + entrées − sorties saisies (+ dépôts − retraits clients en mode agent), comparé au comptage.");
 
-        XlsxWriter.Sheet j = w.sheet("Journal", 17, 14, 20, 9, 13, 11, 14, 14, 24, 12, 24, 18, 40);
-        j.row("Date", "Compte", "Type", "Sens", "Montant (FCFA)", "Frais (FCFA)", "Solde avant (FCFA)", "Solde après (FCFA)",
-                "Contrepartie", "Numéro", "ID transaction", "Motif", "Contrôle");
-        for (Txn t : inPeriod(r, from, to))
-            j.row(new Date(t.date), Txn.opName(t.op), t.typeLabel(), sens(t), t.isBalanceCheck() ? null : fcfa(t.montant),
-                    t.frais == 0 ? null : fcfa(t.frais), fcfa(t.avant), fcfa(t.solde != null ? t.solde : t.apres),
-                    t.nom, t.numero, t.txnId, t.motif, controle(t));
+        XlsxWriter.Sheet j = w.sheet("Journal de caisse", 17, 14, 20, 9, 13, 11, 14, 24, 12, 24, 16, 30, 36);
+        j.row("Date", "Compte", "Type", "Sens", "Montant (FCFA)", "Frais (FCFA)", "Solde après (FCFA)", "Contrepartie", "Numéro",
+                "ID transaction", "Catégorie", "Motif", "Contrôle");
+        List<Caisse.Ligne> asc = new ArrayList<>(bilan.lignes);
+        Collections.reverse(asc);
+        for (Caisse.Ligne l : asc) {
+            Txn t = l.sms;
+            j.row(new Date(t.date), Txn.opName(t.op), t.typeLabel(), sens(t), fcfa(t.montant), t.frais == 0 ? null : fcfa(t.frais),
+                    fcfa(t.solde != null ? t.solde : t.apres), t.nom, t.numero, t.txnId,
+                    Caisse.categorieNom(l.categorie) + (l.auto ? " (auto)" : ""), l.motif, controle(t));
+        }
+
+        XlsxWriter.Sheet c = w.sheet("À classer", 17, 14, 20, 9, 13, 24, 12, 24);
+        c.row("Date", "Compte", "Type", "Sens", "Montant (FCFA)", "Contrepartie", "Numéro", "ID transaction");
+        List<Caisse.Ligne> ac = new ArrayList<>(bilan.aClasser);
+        Collections.reverse(ac);
+        for (Caisse.Ligne l : ac) {
+            Txn t = l.sms;
+            c.row(new Date(t.date), Txn.opName(t.op), t.typeLabel(), sens(t), fcfa(t.montant), t.nom, t.numero, t.txnId);
+        }
+
+        XlsxWriter.Sheet es = w.sheet("Espèces", 17, 10, 13, 16, 30, 12);
+        es.row("Date", "Sens", "Montant (FCFA)", "Catégorie", "Libellé", "Statut");
+        List<Caisse.Saisie> me = new ArrayList<>(bilan.mouvementsEspeces);
+        Collections.reverse(me);
+        for (Caisse.Saisie x : me)
+            es.row(new Date(x.date), x.sens > 0 ? "Entrée" : "Sortie", fcfa(x.montant), Caisse.categorieNom(x.categorie), x.libelle,
+                    x.annule ? "Annulée" : "Valide");
 
         XlsxWriter.Sheet v = w.sheet("À vérifier", 17, 14, 40, 100);
         v.row("Date", "Compte", "Raison", "SMS");
