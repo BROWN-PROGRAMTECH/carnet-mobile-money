@@ -26,12 +26,15 @@ import java.util.UUID;
 public final class Cloud {
     private Cloud() {}
 
-    public static final String VERSION_APP = "0.4.1";
+    public static final String VERSION_APP = "0.6";
     private static final String DOMAIN = "@carnet-mm.app";
     private static final int PAGE = 1000, BATCH = 500;
 
     public static final class CloudException extends Exception {
-        public CloudException(String message) { super(message); }
+        /** Vrai si l'échec vient du réseau (pas de connexion), faux si le serveur a refusé. */
+        public final boolean reseau;
+        public CloudException(String message) { this(message, false); }
+        public CloudException(String message, boolean reseau) { super(message); this.reseau = reseau; }
     }
 
     public static boolean configured() {
@@ -106,6 +109,8 @@ public final class Cloud {
     public static void signOut(Context c) {
         String token = prefs(c).getString("access_token", "");
         if (!token.isEmpty()) {
+            // Dernière chance d'envoyer les exports faits hors ligne : ils appartiennent à ce compte.
+            try { envoyerExportsEnAttente(c, token(c)); } catch (Exception ignored) {}
             try { http("POST", "/auth/v1/logout", "{}", token, null); } catch (Exception ignored) {}
         }
         String device = prefs(c).getString("device_id", "");
@@ -140,7 +145,7 @@ public final class Cloud {
             saveSession(c, r, null);
             return r.getString("access_token");
         } catch (CloudException e) {
-            if (e.getMessage() != null && e.getMessage().startsWith("Pas de connexion")) throw e;
+            if (e.reseau) throw e;
             signOut(c);
             throw new CloudException("Session expirée : reconnectez-vous dans « Compte et sauvegarde ».");
         } catch (Exception e) {
@@ -186,47 +191,293 @@ public final class Cloud {
                 prefs(c).edit().putLong("pull_" + s.table, newest).apply();
 
                 // 2. Envoyer ce qui a été modifié sur ce téléphone.
+                // Position (date de modification, clé) : reprend exactement là où le lot précédent s'est arrêté.
+                // Les anciennes versions n'avaient pas de clé : on repart de "" à la même date, ce qui renvoie
+                // aussi les lignes de même date jamais envoyées (rattrapage automatique).
                 long sent = prefs(c).getLong("push_" + s.table, 0);
+                String sentKey = prefs(c).getString("pushk_" + s.table, "");
+                int keyIdx = 0;
+                for (int k = 0; k < s.cols.length; k++) if (s.cols[k].equals(s.key)) keyIdx = k;
                 while (true) {
-                    List<Object[]> rows = st.changedSince(s, sent, BATCH);
+                    List<Object[]> rows = st.changedSince(s, sent, sentKey, BATCH);
                     if (rows.isEmpty()) break;
                     JSONArray arr = new JSONArray();
-                    long max = sent;
                     for (Object[] row : rows) {
                         JSONObject o = new JSONObject();
                         o.put("user_id", userId);
                         for (int k = 0; k < s.cols.length; k++) o.put(s.cols[k], row[k] == null ? JSONObject.NULL : row[k]);
-                        Object m = row[s.cols.length - 1];
-                        if (m instanceof Long && (Long) m > max) max = (Long) m;
                         arr.put(o);
                     }
                     http("POST", "/rest/v1/" + s.table + "?on_conflict=user_id," + s.key, arr.toString(), tok,
                             "resolution=merge-duplicates,return=minimal");
                     pushed += rows.size();
-                    sent = max;
-                    prefs(c).edit().putLong("push_" + s.table, sent).apply();
+                    Object[] last = rows.get(rows.size() - 1);
+                    Object m = last[s.cols.length - 1];
+                    sent = m instanceof Long ? (Long) m : sent;
+                    sentKey = last[keyIdx] == null ? "" : last[keyIdx].toString();
+                    prefs(c).edit().putLong("push_" + s.table, sent).putString("pushk_" + s.table, sentKey).apply();
                     if (rows.size() < BATCH) break;
                 }
             }
             registerDevice(c, tok, userId);
+            try { envoyerExportsEnAttente(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
+            envoyerIncidents(c, tok, userId);
         } catch (CloudException e) {
             saveError(c, e.getMessage());
+            prefs(c).edit().putString("incident_attente", e.getMessage()).apply();
             throw e;
         } catch (Exception e) {
             saveError(c, e.getMessage());
+            prefs(c).edit().putString("incident_attente", String.valueOf(e.getMessage())).apply();
             throw new CloudException("Sauvegarde interrompue : " + e.getMessage());
         }
         prefs(c).edit().putLong("last_sync", System.currentTimeMillis()).putString("last_error", "").apply();
         return pulled + " élément(s) reçu(s), " + pushed + " envoyé(s).";
     }
 
-    /** Fiche de l'appareil, pour le suivi du parc (tableau de bord superadmin à venir). */
-    private static void registerDevice(Context c, String tok, String userId) throws Exception {
+// ---------- Porte-monnaie et exports payants ----------
+
+    private static String deviceId(Context c) {
         String device = prefs(c).getString("device_id", "");
         if (device.isEmpty()) {
             device = UUID.randomUUID().toString();
             prefs(c).edit().putString("device_id", device).apply();
         }
+        return device;
+    }
+
+    /** Texte d'un champ JSON ; vide si absent ou null (Android renverrait « null »). */
+    private static String str(JSONObject o, String k) {
+        return o.isNull(k) ? "" : o.optString(k, "");
+    }
+
+    /** État du porte-monnaie tel que connu par ce téléphone (dernière réponse du serveur + exports hors ligne). */
+    public static final class Portefeuille {
+        public boolean connu;
+        public long solde, enAttente, verifie;
+        public int offertsRestants, prixPetit = Tarif.PETIT, prixGrand = Tarif.GRAND, seuil = Tarif.SEUIL, rechargeMin = 500;
+        public int exportsHorsLigne;
+        public boolean suspendu;
+        public String numeroOm = "", numeroMomo = "", marchand = "";
+        public JSONArray historique = new JSONArray();
+
+        public Tarif.Decision decider(int nb) {
+            return Tarif.decider(nb, solde, offertsRestants, prixPetit, prixGrand, seuil);
+        }
+    }
+
+    public static Portefeuille portefeuille(Context ctx) {
+        SharedPreferences p = prefs(ctx.getApplicationContext());
+        Portefeuille w = new Portefeuille();
+        String raw = p.getString("pf_json", "");
+        if (!raw.isEmpty()) {
+            try {
+                JSONObject o = new JSONObject(raw);
+                w.connu = true;
+                w.solde = o.optLong("solde", 0);
+                w.offertsRestants = o.optInt("offerts_restants", 0);
+                w.suspendu = o.optBoolean("suspendu", false);
+                w.prixPetit = o.optInt("prix_petit", Tarif.PETIT);
+                w.prixGrand = o.optInt("prix_grand", Tarif.GRAND);
+                w.seuil = o.optInt("seuil", Tarif.SEUIL);
+                w.rechargeMin = o.optInt("recharge_min", 500);
+                w.numeroOm = str(o, "numero_om");
+                w.numeroMomo = str(o, "numero_momo");
+                w.marchand = str(o, "nom_marchand");
+                w.enAttente = o.optLong("en_attente", 0);
+                JSONArray h = o.optJSONArray("historique");
+                if (h != null) w.historique = h;
+            } catch (Exception ignored) {
+                w.connu = false;
+            }
+        }
+        w.verifie = p.getLong("pf_verifie", 0);
+        // Exports faits hors ligne, pas encore transmis : déjà déduits ici.
+        try {
+            JSONArray q = new JSONArray(p.getString("exports_attente", "[]"));
+            for (int i = 0; i < q.length(); i++) {
+                JSONObject e = q.getJSONObject(i);
+                w.exportsHorsLigne++;
+                if (e.optBoolean("offert", false)) w.offertsRestants = Math.max(0, w.offertsRestants - 1);
+                else w.solde -= e.optLong("prix", 0);
+            }
+        } catch (Exception ignored) {}
+        return w;
+    }
+
+    private static void rafraichirPortefeuille(Context c, String tok) throws Exception {
+        String r = http("POST", "/rest/v1/rpc/mon_portefeuille", "{}", tok, null).trim();
+        if (!r.startsWith("{")) return;
+        new JSONObject(r); // contrôle du format avant de mémoriser
+        prefs(c).edit().putString("pf_json", r).putLong("pf_verifie", System.currentTimeMillis()).apply();
+    }
+
+    /** Met à jour le porte-monnaie (après une recharge validée, par exemple). */
+    public static void rafraichirPortefeuille(Context ctx) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        String tok = token(c);
+        try {
+            envoyerExportsEnAttente(c, tok);
+            rafraichirPortefeuille(c, tok);
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    /** Résultat d'un débit d'export. */
+    public static final class Debit {
+        public int prix;
+        public boolean offert, horsLigne;
+        public long solde;
+    }
+
+    /**
+     * Débite un export Excel avant d'écrire le fichier. En ligne, le serveur décide.
+     * Sans réseau, l'export passe si le dernier solde connu suffit ; le débit est envoyé plus tard.
+     */
+    public static Debit payerExport(Context ctx, int nb, String periode) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        String id = UUID.randomUUID().toString();
+        long now = System.currentTimeMillis();
+        try {
+            String tok = token(c);
+            JSONObject body = new JSONObject();
+            body.put("p_id", id);
+            body.put("p_nb", nb);
+            body.put("p_periode", periode);
+            body.put("p_device", deviceId(c));
+            body.put("p_date", now);
+            body.put("p_hors_ligne", false);
+            JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/payer_export", body.toString(), tok, null));
+            Debit d = new Debit();
+            d.prix = r.optInt("prix", 0);
+            d.offert = r.optBoolean("offert", false);
+            d.solde = r.optLong("solde", 0);
+            memoriserSolde(c, d.solde, r.optInt("offerts_restants", 0));
+            try { rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
+            return d;
+        } catch (CloudException e) {
+            if (!e.reseau) throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+        // Hors ligne : décision sur le dernier état connu.
+        Portefeuille w = portefeuille(c);
+        if (!w.connu) throw new CloudException("Pas de réseau : connectez-vous une première fois à internet pour activer les exports.");
+        if (w.suspendu) throw new CloudException("Compte suspendu : contactez le service client.");
+        Tarif.Decision dec = w.decider(nb);
+        if (!dec.possible) throw new CloudException("Pas de réseau, et le dernier solde connu (" + Tarif.fcfa(Math.max(0, w.solde))
+                + ") ne suffit pas pour cet export (" + Tarif.fcfa(dec.prix) + "). Réessayez avec du réseau.");
+        try {
+            JSONArray q = new JSONArray(prefs(c).getString("exports_attente", "[]"));
+            JSONObject e = new JSONObject();
+            e.put("id", id);
+            e.put("nb", nb);
+            e.put("periode", periode);
+            e.put("date", now);
+            e.put("prix", dec.prix);
+            e.put("offert", dec.offert);
+            q.put(e);
+            prefs(c).edit().putString("exports_attente", q.toString()).apply();
+        } catch (Exception ex) {
+            throw new CloudException("Export impossible : " + ex.getMessage());
+        }
+        Debit d = new Debit();
+        d.prix = dec.prix;
+        d.offert = dec.offert;
+        d.horsLigne = true;
+        d.solde = dec.soldeApres;
+        return d;
+    }
+
+    private static void memoriserSolde(Context c, long solde, int offerts) {
+        try {
+            String raw = prefs(c).getString("pf_json", "");
+            JSONObject o = raw.isEmpty() ? new JSONObject() : new JSONObject(raw);
+            o.put("solde", solde);
+            o.put("offerts_restants", offerts);
+            prefs(c).edit().putString("pf_json", o.toString()).putLong("pf_verifie", System.currentTimeMillis()).apply();
+        } catch (Exception ignored) {}
+    }
+
+    /** Transmet les exports faits sans réseau ; chacun a un identifiant unique, il n'est jamais débité deux fois. */
+    private static void envoyerExportsEnAttente(Context c, String tok) throws Exception {
+        JSONArray q = new JSONArray(prefs(c).getString("exports_attente", "[]"));
+        if (q.length() == 0) return;
+        JSONArray reste = new JSONArray();
+        for (int i = 0; i < q.length(); i++) {
+            JSONObject e = q.getJSONObject(i);
+            try {
+                JSONObject body = new JSONObject();
+                body.put("p_id", e.getString("id"));
+                body.put("p_nb", e.optInt("nb", 0));
+                body.put("p_periode", e.optString("periode", ""));
+                body.put("p_device", deviceId(c));
+                body.put("p_date", e.optLong("date", System.currentTimeMillis()));
+                body.put("p_hors_ligne", true);
+                http("POST", "/rest/v1/rpc/payer_export", body.toString(), tok, null);
+            } catch (CloudException ex) {
+                if (ex.reseau) { reste.put(e); for (int j = i + 1; j < q.length(); j++) reste.put(q.getJSONObject(j)); break; }
+                // Refus définitif du serveur (format, identifiant) : on n'insiste pas.
+            }
+        }
+        prefs(c).edit().putString("exports_attente", reste.toString()).apply();
+    }
+
+    /** Déclare une recharge OM ou MoMo par son ID de transaction ; renvoie un message pour l'utilisateur. */
+    public static String declarerRecharge(Context ctx, String operateur, String reference, long montant) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        String tok = token(c);
+        try {
+            JSONObject body = new JSONObject();
+            body.put("p_operateur", operateur);
+            body.put("p_reference", reference);
+            body.put("p_montant", montant);
+            JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/declarer_recharge", body.toString(), tok, null));
+            try { rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
+            return "Recharge de " + Tarif.fcfa(r.optLong("montant", montant)) + " déclarée. Elle sera ajoutée à votre solde dès sa validation.";
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    
+    // ---------- Incidents (sans contenu personnel) ----------
+
+    private static void envoyerIncidents(Context c, String tok, String userId) {
+        try {
+            String attente = prefs(c).getString("incident_attente", "");
+            if (!attente.isEmpty()) {
+                incident(c, tok, userId, "SAUVEGARDE_ECHEC", attente);
+                prefs(c).edit().putString("incident_attente", "").apply();
+            }
+            long inconnus = Store.prefLong(c, "nonReconnus", 0), signales = prefs(c).getLong("nonReconnusSignales", 0);
+            if (inconnus > signales) {
+                incident(c, tok, userId, "SMS_NON_RECONNUS", inconnus + " SMS mobile money non reconnus sur ce téléphone (contenu non transmis).");
+                prefs(c).edit().putLong("nonReconnusSignales", inconnus).apply();
+            }
+        } catch (Exception ignored) {
+            // Un incident non transmis le sera à la prochaine sauvegarde.
+        }
+    }
+
+    private static void incident(Context c, String tok, String userId, String type, String message) throws Exception {
+        JSONObject o = new JSONObject();
+        o.put("user_id", userId);
+        o.put("device_id", deviceId(c));
+        o.put("type", type);
+        o.put("message", message == null ? "" : (message.length() > 500 ? message.substring(0, 500) : message));
+        o.put("version_app", VERSION_APP);
+        http("POST", "/rest/v1/incident", new JSONArray().put(o).toString(), tok, "return=minimal");
+    }
+
+    /** Fiche de l'appareil, pour le suivi du parc (tableau de bord superadmin). */
+    private static void registerDevice(Context c, String tok, String userId) throws Exception {
+        String device = deviceId(c);
         JSONObject o = new JSONObject();
         o.put("user_id", userId);
         o.put("device_id", device);
@@ -267,7 +518,7 @@ public final class Cloud {
         } catch (CloudException e) {
             throw e;
         } catch (IOException e) {
-            throw new CloudException("Pas de connexion internet ou serveur injoignable. Réessayez quand le réseau revient.");
+            throw new CloudException("Pas de connexion internet ou serveur injoignable. Réessayez quand le réseau revient.", true);
         } finally {
             if (con != null) con.disconnect();
         }
@@ -292,6 +543,7 @@ public final class Cloud {
             for (String k : new String[] {"msg", "error_description", "message", "error"}) {
                 if (o.has(k) && !o.isNull(k)) { raw = o.getString(k); break; }
             }
+            if ("P0001".equals(o.optString("code", ""))) return raw;
         } catch (Exception ignored) {}
         String low = raw.toLowerCase();
         if (low.contains("invalid login credentials")) return "Numéro ou code secret incorrect.";

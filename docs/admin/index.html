@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Carnet MM · Superadmin</title>
+<style>
+:root{
+  --bg:#F5F4EF;--surface:#FFFFFF;--ink:#1D2321;--muted:#66706B;--line:#E2E0D8;
+  --accent:#0F6B4F;--accent-bg:#E3F1E8;--warn:#9A5B00;--warn-bg:#F8EBD8;--bad:#A3322A;--bad-bg:#F8E1DF;
+  --om:#D86A00;--momo:#B58A00;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#141816;--surface:#1D2220;--ink:#E8ECE9;--muted:#9AA39E;--line:#2E3532;
+  --accent:#5CC59A;--accent-bg:#17352A;--warn:#E6A94A;--warn-bg:#3A2C14;--bad:#EF8A80;--bad-bg:#3D1D1A;
+  --om:#FF9A3D;--momo:#F2C94C;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{background:var(--surface);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{font-size:16px;margin:0;flex:1}
+header .who{color:var(--muted);font-size:13px}
+main{max-width:1180px;margin:0 auto;padding:16px}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+nav button{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:999px;padding:7px 14px;font:inherit;cursor:pointer}
+nav button.on{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+nav .n{display:inline-block;min-width:18px;padding:0 5px;margin-left:6px;border-radius:9px;background:var(--bad);color:#fff;font-size:11px;text-align:center}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin-bottom:14px}
+.kpi .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.kpi .v{font-size:24px;font-weight:650;margin-top:4px;font-variant-numeric:tabular-nums}
+.kpi.warn .v{color:var(--warn)}.kpi.bad .v{color:var(--bad)}.kpi.good .v{color:var(--accent)}
+.tablewrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px}
+table{border-collapse:collapse;width:100%;min-width:720px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em;background:var(--bg)}
+tr:last-child td{border-bottom:0}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+.t-essai{background:var(--accent-bg);color:var(--accent)}.t-actif{background:var(--accent);color:var(--surface)}
+.t-hors_ligne{background:var(--warn-bg);color:var(--warn)}.t-offert{background:var(--accent-bg);color:var(--accent)}
+.t-expire,.t-refuse{background:var(--bad-bg);color:var(--bad)}.t-suspendu{background:var(--ink);color:var(--surface)}
+.t-en_attente{background:var(--warn-bg);color:var(--warn)}.t-valide{background:var(--accent-bg);color:var(--accent)}
+.op-OM{color:var(--om);font-weight:700}.op-MOMO{color:var(--momo);font-weight:700}
+.muted{color:var(--muted)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+button.b{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:5px 10px;font:inherit;font-size:13px;cursor:pointer;white-space:nowrap}
+button.b.p{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+button.b.x{color:var(--bad)}
+button.b:disabled{opacity:.5;cursor:default}
+.actions{display:flex;gap:6px;flex-wrap:wrap}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+input,select,textarea{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%}
+.bar input,.bar select{width:auto}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+.login{max-width:380px;margin:8vh auto}
+.login h2{margin:0 0 4px;font-size:20px}
+.msg{padding:10px 12px;border-radius:8px;margin:10px 0;font-size:13px}
+.msg.err{background:var(--bad-bg);color:var(--bad)}.msg.ok{background:var(--accent-bg);color:var(--accent)}.msg.info{background:var(--warn-bg);color:var(--warn)}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);padding:18px;width:min(440px,calc(100vw - 32px))}
+dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog h3{margin:0 0 6px;font-size:16px}
+dialog .actions{justify-content:flex-end;margin-top:14px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.empty{padding:26px;text-align:center;color:var(--muted)}
+.demo{background:var(--warn-bg);color:var(--warn);text-align:center;padding:6px;font-size:13px}
+</style>
+</head>
+<body>
+<div id="demoBand" class="demo" hidden>Mode démonstration : données fictives, aucune action n'est envoyée au serveur.</div>
+<header id="top" hidden>
+  <h1>Carnet Mobile Money · Superadmin</h1>
+  <span class="who" id="who"></span>
+  <button class="b" id="refresh">Actualiser</button>
+  <button class="b" id="logout">Se déconnecter</button>
+</header>
+
+<main>
+  <section id="loginView" class="login card" hidden>
+    <h2>Superadmin</h2>
+    <p class="muted">Connectez-vous avec le numéro et le code secret de votre compte Carnet Mobile Money déclaré administrateur.</p>
+    <div id="cfgBox" hidden>
+      <label for="cfgUrl">Adresse du projet Supabase</label>
+      <input id="cfgUrl" placeholder="https://xxxx.supabase.co">
+      <label for="cfgKey">Clé publique (sb_publishable_… ou anon)</label>
+      <input id="cfgKey" placeholder="sb_publishable_…">
+    </div>
+    <label for="phone">Numéro</label>
+    <input id="phone" inputmode="tel" placeholder="6XXXXXXXX" autocomplete="username">
+    <label for="code">Code secret</label>
+    <input id="code" type="password" autocomplete="current-password">
+    <div id="loginMsg"></div>
+    <div class="actions" style="margin-top:14px">
+      <button class="b p" id="loginBtn">Se connecter</button>
+      <button class="b" id="demoBtn">Voir la démonstration</button>
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:14px">Seule la clé publique est utilisée ici. Ne collez jamais la clé secrète (sb_secret_… / service_role) dans cette page.</p>
+  </section>
+
+  <section id="appView" hidden>
+    <nav id="tabs"></nav>
+    <div id="flash"></div>
+    <div id="view"></div>
+  </section>
+</main>
+
+<dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+// ---- Configuration : adresse et clé PUBLIQUE du projet (jamais la clé secrète) ----
+const SUPABASE_URL = "https://saxnpugntqgiobpvrgry.supabase.co";
+const SUPABASE_KEY = "sb_publishable_4jfvUCG4J_Z890eUfZ-rVw_6hP7I4On";
+// -----------------------------------------------------------------------------------
+
+const $ = id => document.getElementById(id);
+const store = {get(k){try{return localStorage.getItem(k)||""}catch(e){return ""}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+let sb = null, demo = false, tab = "apercu", cache = {};
+
+const fcfa = n => (Number(n)||0).toLocaleString("fr-FR").replace(/ | /g," ") + " FCFA";
+const d = v => { if(v==null||v==="") return "—"; const t = new Date(v); return isNaN(t)?"—":t.toLocaleDateString("fr-FR"); };
+const dt = v => { if(v==null||v==="") return "—"; const t = new Date(v); return isNaN(t)?"—":t.toLocaleString("fr-FR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"}); };
+const ago = ms => { if(!ms) return "jamais"; const h=(Date.now()-ms)/36e5; if(h<1) return "il y a "+Math.max(1,Math.round(h*60))+" min"; if(h<48) return "il y a "+Math.round(h)+" h"; return "il y a "+Math.round(h/24)+" j"; };
+const esc = s => String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const tel = t => t ? esc(t) : '<span class="muted">—</span>';
+const STATUTS = {en_attente:"En attente",valide:"Validée",refuse:"Refusée",suspendu:"Suspendu",actif:"Actif",offert:"Offert",paye:"Payé",hors_ligne:"Hors ligne"};
+const tag = s => `<span class="tag t-${esc(s)}">${esc(STATUTS[s]||s)}</span>`;
+const OPS = {OM:"Orange Money", MOMO:"MTN MoMo", ADMIN:"Crédit admin"};
+
+function flash(text, kind="ok"){ $("flash").innerHTML = text?`<div class="msg ${kind}">${esc(text)}</div>`:""; if(text) setTimeout(()=>{ if($("flash").textContent===text) $("flash").innerHTML=""; }, 7000); }
+
+// ---------- Connexion ----------
+function config(){ return {url: SUPABASE_URL || store.get("cmm_url"), key: SUPABASE_KEY || store.get("cmm_key")}; }
+function phone9(s){ let x=String(s).replace(/\D/g,""); if(x.length>9) x=x.slice(-9); return /^6\d{8}$/.test(x)?x:null; }
+
+async function init(){
+  const c = config();
+  $("cfgBox").hidden = !!(SUPABASE_URL && SUPABASE_KEY);
+  $("cfgUrl").value = c.url; $("cfgKey").value = c.key;
+  if (c.url && c.key && window.supabase) {
+    sb = window.supabase.createClient(c.url, c.key);
+    const { data } = await sb.auth.getSession();
+    if (data.session && await checkAdmin()) return showApp(data.session);
+  }
+  showLogin();
+}
+function showLogin(msg){ $("top").hidden=true; $("appView").hidden=true; $("loginView").hidden=false; $("loginMsg").innerHTML = msg?`<div class="msg err">${esc(msg)}</div>`:""; }
+async function checkAdmin(){ const { data, error } = await sb.rpc("est_admin"); return !error && data === true; }
+
+$("loginBtn").onclick = async () => {
+  const p = phone9($("phone").value);
+  if (!p) return showLogin("Numéro invalide : 9 chiffres commençant par 6.");
+  const url = SUPABASE_URL || $("cfgUrl").value.trim().replace(/\/+$/,""), key = SUPABASE_KEY || $("cfgKey").value.trim();
+  if (!url || !key) return showLogin("Renseignez l'adresse et la clé publique du projet.");
+  if (/^sb_secret_|service_role/.test(key)) return showLogin("Ceci est une clé secrète : utilisez la clé publique.");
+  if (!window.supabase) return showLogin("Bibliothèque Supabase non chargée : vérifiez la connexion internet.");
+  store.set("cmm_url", url); store.set("cmm_key", key);
+  sb = window.supabase.createClient(url, key);
+  $("loginBtn").disabled = true;
+  const { data, error } = await sb.auth.signInWithPassword({ email: "237"+p+"@carnet-mm.app", password: $("code").value });
+  $("loginBtn").disabled = false;
+  if (error) return showLogin(/invalid/i.test(error.message) ? "Numéro ou code secret incorrect." : error.message);
+  if (!await checkAdmin()) { await sb.auth.signOut(); return showLogin("Ce compte n'est pas administrateur (voir le guide : table public.admin)."); }
+  showApp(data.session);
+};
+$("demoBtn").onclick = () => { demo = true; $("demoBand").hidden = false; showApp(null); };
+$("logout").onclick = async () => { if (demo) { location.reload(); return; } await sb.auth.signOut(); showLogin(); };
+$("refresh").onclick = () => load(true);
+
+function showApp(session){
+  $("loginView").hidden=true; $("top").hidden=false; $("appView").hidden=false;
+  const m = session?.user?.email?.match(/^237(\d{9})@/);
+  $("who").textContent = demo ? "Démonstration" : (m ? "Admin " + m[1] : "Admin");
+  load(true);
+}
+
+// ---------- Données ----------
+async function rpc(name, args){
+  if (demo) return Demo.rpc(name, args);
+  const { data, error } = await sb.rpc(name, args || {});
+  if (error) throw new Error(error.message);
+  return data;
+}
+async function load(all){
+  try {
+    const t = { stats: rpc("admin_stats") };
+    if (all || ["apercu","recharges"].includes(tab)) t.recharges = rpc("admin_recharges", { p_statut: null });
+    if (all || ["apercu","comptes"].includes(tab)) t.comptes = rpc("admin_comptes");
+    if (all || tab==="exports") t.exports = rpc("admin_exports", { p_jours: 30 });
+    if (all || tab==="appareils") t.appareils = rpc("admin_appareils");
+    if (all || tab==="incidents") t.incidents = rpc("admin_incidents", { p_jours: 30 });
+    if (all || tab==="parametres") t.parametres = demo ? Demo.rpc("parametres") : sb.from("parametre").select("cle,valeur").then(r=>{ if(r.error) throw r.error; return r.data; });
+    const keys = Object.keys(t), vals = await Promise.all(Object.values(t));
+    keys.forEach((k,i)=>cache[k]=vals[i]);
+    render();
+  } catch (e) {
+    if (/JWT|expired|Réservé/i.test(e.message) && !demo) return showLogin("Session expirée : reconnectez-vous.");
+    flash("Chargement impossible : " + e.message, "err");
+  }
+}
+
+// ---------- Affichage ----------
+const TABS = [["apercu","Vue d'ensemble"],["recharges","Recharges"],["comptes","Comptes"],["exports","Exports"],["appareils","Téléphones"],["incidents","Incidents"],["parametres","Paramètres"]];
+function render(){
+  const s = cache.stats || {};
+  $("tabs").innerHTML = TABS.map(([k,l])=>{
+    const n = k==="recharges" ? s.recharges_en_attente : (k==="incidents" ? s.incidents_7_jours : 0);
+    return `<button class="${k===tab?"on":""}" data-tab="${k}">${l}${n?`<span class="n">${n}</span>`:""}</button>`;
+  }).join("");
+  $("tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{ tab=b.dataset.tab; render(); load(false); });
+  $("view").innerHTML = ({apercu,recharges,comptes,exports,appareils,incidents,parametres})[tab]();
+  bind();
+}
+
+function apercu(){
+  const s = cache.stats || {};
+  const k = (l,v,c="",sub="") => `<div class="card kpi ${c}"><div class="l">${l}</div><div class="v">${v}</div>${sub?`<div class="muted" style="font-size:12px;margin-top:2px">${sub}</div>`:""}</div>`;
+  const att = (cache.recharges||[]).filter(p=>p.statut==="en_attente");
+  const top = [...(cache.comptes||[])].sort((a,b)=>b.depense-a.depense).filter(c=>c.depense>0).slice(0,6);
+  return `<div class="kpis">
+    ${k("Encaissé ce mois", fcfa(s.recharges_mois), "good", "recharges validées")}
+    ${k("Consommé ce mois", fcfa(s.revenu_exports_mois), "", (s.exports_payants_mois||0) + " exports payants")}
+    ${k("Recharges à valider", s.recharges_en_attente||0, s.recharges_en_attente?"warn":"", s.montant_en_attente ? fcfa(s.montant_en_attente) : "")}
+    ${k("Soldes clients", fcfa(s.soldes_total), "", "argent prépayé non encore consommé")}
+    ${k("Comptes", s.comptes||0, "", "+" + (s.nouveaux_7_jours||0) + " en 7 jours")}
+    ${k("Clients payants", s.clients_payants||0, "good")}
+    ${k("Exports ce mois", s.exports_mois||0)}
+    ${k("Soldes négatifs", s.soldes_negatifs||0, s.soldes_negatifs?"bad":"", "exports hors ligne non couverts")}
+    ${k("Téléphones", s.appareils||0)}
+    ${k("Silencieux > 24 h", s.appareils_silencieux||0, s.appareils_silencieux?"warn":"")}
+    ${k("Incidents (7 j)", s.incidents_7_jours||0, s.incidents_7_jours?"bad":"")}
+  </div>
+  <div class="grid2">
+    <div class="card"><h3 style="margin:0 0 8px;font-size:15px">Recharges à valider</h3>
+      ${att.length ? att.slice(0,6).map(p=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)"><span><span class="op-${p.operateur}">${p.operateur==="OM"?"OM":"MoMo"}</span> ${tel(p.telephone)} · <span class="mono">${esc(p.reference)}</span></span><b>${fcfa(p.montant)}</b></div>`).join("") + `<p><button class="b p" data-go="recharges">Traiter les recharges</button></p>` : `<p class="muted">Aucune recharge en attente.</p>`}
+    </div>
+    <div class="card"><h3 style="margin:0 0 8px;font-size:15px">Meilleurs clients</h3>
+      ${top.length ? top.map(c=>`<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)"><span>${tel(c.telephone)} <span class="muted">· ${c.exports} exports</span></span><span>${fcfa(c.depense)}</span></div>`).join("") : `<p class="muted">Aucun export payant pour l'instant.</p>`}
+    </div>
+  </div>`;
+}
+
+let filtreRecharge = "en_attente";
+function recharges(){
+  const rows = (cache.recharges||[]).filter(p=>!filtreRecharge || p.statut===filtreRecharge);
+  return `<div class="bar"><select id="fRec">
+      ${[["en_attente","En attente"],["valide","Validées"],["refuse","Refusées"],["","Toutes"]].map(([v,l])=>`<option value="${v}" ${v===filtreRecharge?"selected":""}>${l}</option>`).join("")}
+    </select><span class="muted">Vérifiez chaque ID et montant dans l'historique de votre numéro marchand avant de valider.</span></div>
+    <div class="tablewrap"><table><thead><tr><th>Déclarée le</th><th>Client</th><th>Opérateur</th><th>ID de transaction</th><th class="num">Montant</th><th class="num">Solde actuel</th><th>Statut</th><th></th></tr></thead><tbody>
+    ${rows.map(p=>`<tr><td>${dt(p.cree)}</td><td>${tel(p.telephone)}</td><td class="op-${esc(p.operateur)}">${esc(OPS[p.operateur]||p.operateur)}</td>
+      <td class="mono">${p.operateur==="ADMIN"?'<span class="muted">—</span>':esc(p.reference)}</td><td class="num">${fcfa(p.montant)}</td><td class="num">${fcfa(p.solde)}</td>
+      <td>${tag(p.statut)}${p.motif?`<div class="muted" style="font-size:12px">${esc(p.motif)}</div>`:""}${p.traite?`<div class="muted" style="font-size:12px">${dt(p.traite)}</div>`:""}</td>
+      <td>${p.statut==="en_attente"?`<div class="actions"><button class="b p" data-valider="${p.id}">Valider</button><button class="b x" data-refuser="${p.id}">Refuser</button></div>`:""}</td></tr>`).join("") || `<tr><td colspan="8" class="empty">Aucune recharge.</td></tr>`}
+    </tbody></table></div>`;
+}
+
+let rechercheCompte = "";
+function comptes(){
+  const q = rechercheCompte.replace(/\D/g,"");
+  const rows = (cache.comptes||[]).filter(c=>!q || String(c.telephone||"").includes(q));
+  return `<div class="bar"><input id="qCompte" placeholder="Rechercher un numéro" value="${esc(rechercheCompte)}" inputmode="tel"></div>
+    <div class="tablewrap"><table><thead><tr><th>Numéro</th><th class="num">Solde</th><th class="num">Exports</th><th class="num">Dépensé</th><th>Dernier export</th><th>Dernière sauvegarde</th><th>Note</th><th></th></tr></thead><tbody>
+    ${rows.map(c=>`<tr><td>${tel(c.telephone)}${c.suspendu?" "+tag("suspendu"):""}<div class="muted" style="font-size:12px">depuis ${d(c.cree)} · ${c.appareils} tél.</div></td>
+      <td class="num ${c.solde<0?"bad":""}"><b>${fcfa(c.solde)}</b>${c.recharges_en_attente?`<div>${tag("en_attente")}</div>`:""}</td>
+      <td class="num">${c.exports}${c.offerts_utilises?`<div class="muted" style="font-size:12px">dont ${c.offerts_utilises} offert</div>`:""}</td>
+      <td class="num">${fcfa(c.depense)}</td><td>${d(c.dernier_export)}</td><td>${ago(c.dernier_sync)}</td><td>${esc(c.note||"")}</td>
+      <td><div class="actions"><button class="b" data-crediter="${c.user_id}">Créditer</button><button class="b" data-modifier="${c.user_id}">Modifier</button></div></td></tr>`).join("") || `<tr><td colspan="8" class="empty">Aucun compte.</td></tr>`}
+    </tbody></table></div>`;
+}
+
+function exports(){
+  const rows = cache.exports||[];
+  return `<p class="muted">30 derniers jours. Seuls le nombre d'opérations et la période sont connus : jamais le contenu du fichier.</p>
+    <div class="tablewrap"><table><thead><tr><th>Date</th><th>Client</th><th>Période</th><th class="num">Opérations</th><th class="num">Prix</th><th></th></tr></thead><tbody>
+    ${rows.map(e=>`<tr><td>${dt(e.date_export)}</td><td>${tel(e.telephone)}</td><td>${esc(e.periode)}</td><td class="num">${e.nb_operations}</td>
+      <td class="num">${e.offert?tag("offert"):fcfa(e.prix)}</td><td>${e.hors_ligne?tag("hors_ligne"):""}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">Aucun export.</td></tr>`}
+    </tbody></table></div>`;
+}
+
+function appareils(){
+  const rows = cache.appareils||[];
+  return `<p class="muted">Un téléphone silencieux depuis plus de 24 h n'a plus envoyé de sauvegarde : réseau coupé, application désinstallée ou bloquée par l'économie de batterie.</p>
+    <div class="tablewrap"><table><thead><tr><th>Numéro du compte</th><th>Modèle</th><th>Android</th><th>Version app</th><th>Dernière sauvegarde</th><th>Ajouté le</th></tr></thead><tbody>
+    ${rows.map(a=>{ const old = !a.dernier_sync || Date.now()-a.dernier_sync > 864e5; return `<tr><td>${tel(a.telephone)}</td><td>${esc(a.modele||"—")}</td><td>${esc(a.android||"—")}</td><td class="mono">${esc(a.version_app||"—")}</td>
+      <td class="${old?"warn":""}">${ago(a.dernier_sync)}${old?" ⚠":""}</td><td>${d(a.cree)}</td></tr>`; }).join("") || `<tr><td colspan="6" class="empty">Aucun téléphone.</td></tr>`}
+    </tbody></table></div>`;
+}
+
+const TYPES_INCIDENT = {SAUVEGARDE_ECHEC:"Échec de sauvegarde", SMS_NON_RECONNUS:"SMS non reconnus"};
+function incidents(){
+  const rows = cache.incidents||[];
+  return `<p class="muted">30 derniers jours. Les incidents ne contiennent jamais le texte des SMS ni les transactions des clients.</p>
+    <div class="tablewrap"><table><thead><tr><th>Date</th><th>Numéro</th><th>Type</th><th>Message</th><th>Version</th></tr></thead><tbody>
+    ${rows.map(i=>`<tr><td>${dt(i.cree)}</td><td>${tel(i.telephone)}</td><td>${esc(TYPES_INCIDENT[i.type]||i.type)}</td><td>${esc(i.message||"")}</td><td class="mono">${esc(i.version_app||"")}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">Aucun incident.</td></tr>`}
+    </tbody></table></div>`;
+}
+
+const PARAMS = [
+  ["nom_marchand","Nom affiché pour les paiements","Carnet Mobile Money"],
+  ["numero_om","Numéro Orange Money qui reçoit les recharges","6XXXXXXXX"],
+  ["numero_momo","Numéro MTN MoMo qui reçoit les recharges","6XXXXXXXX"],
+  ["prix_export_petit","Prix d'un export jusqu'au seuil (FCFA)","500"],
+  ["seuil_export","Seuil en nombre d'opérations","200"],
+  ["prix_export_grand","Prix d'un export au-delà du seuil (FCFA)","1000"],
+  ["exports_offerts","Exports offerts à chaque nouveau compte","1"],
+  ["recharge_min","Recharge minimum (FCFA)","500"]];
+function parametres(){
+  const v = Object.fromEntries((cache.parametres||[]).map(p=>[p.cle,p.valeur]));
+  return `<div class="card" style="max-width:560px">
+    ${PARAMS.map(([k,l,ph])=>`<label for="p_${k}">${l}</label><input id="p_${k}" value="${esc(v[k]??"")}" placeholder="${ph}" ${/numero/.test(k)?'inputmode="tel"':/nom/.test(k)?"":'inputmode="numeric"'}>`).join("")}
+    <p class="muted" style="font-size:12px">Les nouveaux tarifs s'appliquent au prochain export de chaque client (l'application les reçoit à sa prochaine connexion). Les numéros s'affichent dans l'écran Exporter → Recharger.</p>
+    <div class="actions"><button class="b p" id="saveParams">Enregistrer</button></div></div>`;
+}
+
+// ---------- Actions ----------
+function bind(){
+  document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{ tab=b.dataset.go; render(); });
+  const f=$("fRec"); if(f) f.onchange=()=>{ filtreRecharge=f.value; render(); };
+  const q=$("qCompte"); if(q){ q.oninput=()=>{ rechercheCompte=q.value; const pos=q.selectionStart; render(); const n=$("qCompte"); n.focus(); n.setSelectionRange(pos,pos); }; }
+  document.querySelectorAll("[data-valider]").forEach(b=>b.onclick=()=>valider(+b.dataset.valider));
+  document.querySelectorAll("[data-refuser]").forEach(b=>b.onclick=()=>refuser(+b.dataset.refuser));
+  document.querySelectorAll("[data-crediter]").forEach(b=>b.onclick=()=>crediter(b.dataset.crediter));
+  document.querySelectorAll("[data-modifier]").forEach(b=>b.onclick=()=>modifier(b.dataset.modifier));
+  const sp=$("saveParams"); if(sp) sp.onclick=saveParams;
+}
+
+function dialog(html, onOk, okLabel="Confirmer", danger=false){
+  const form = $("dlgForm");
+  form.innerHTML = html + `<div id="dlgErr"></div><div class="actions"><button class="b" value="cancel" formnovalidate>Annuler</button><button class="b ${danger?"x":"p"}" value="ok" id="dlgOk">${okLabel}</button></div>`;
+  $("dlgOk").onclick = async ev => {
+    ev.preventDefault();
+    $("dlgOk").disabled = true;
+    try { await onOk(form); $("dlg").close(); }
+    catch(e){ $("dlgErr").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; $("dlgOk").disabled = false; }
+  };
+  $("dlg").showModal();
+}
+async function act(name, args, ok){ await rpc(name, args); flash(demo ? "Démonstration : « " + ok + " » (rien n'a été envoyé)." : ok); await load(true); }
+
+function valider(id){
+  const p = cache.recharges.find(x=>x.id===id);
+  dialog(`<h3>Valider cette recharge ?</h3><p>${esc(OPS[p.operateur])} · <span class="mono">${esc(p.reference)}</span><br><b>${fcfa(p.montant)}</b> · client ${tel(p.telephone)}</p>
+    <p class="muted">Confirmez d'abord que cet ID et ce montant apparaissent bien dans l'historique de votre numéro marchand. Le solde du client passera de ${fcfa(p.solde)} à ${fcfa((p.solde||0)+p.montant)}.</p>`,
+    () => act("admin_valider_recharge", { p_id: id }, "Recharge validée : " + fcfa(p.montant) + " ajoutés au solde."), "Valider");
+}
+function refuser(id){
+  const p = cache.recharges.find(x=>x.id===id);
+  dialog(`<h3>Refuser cette recharge ?</h3><p class="mono">${esc(p.reference)} · ${fcfa(p.montant)}</p>
+    <label for="motif">Motif (visible par le client dans son historique)</label><select id="motif"><option>ID introuvable dans l'historique</option><option>Montant différent du transfert reçu</option><option>Doublon</option><option>Autre</option></select>`,
+    f => act("admin_refuser_recharge", { p_id: id, p_motif: f.querySelector("#motif").value }, "Recharge refusée."), "Refuser", true);
+}
+function crediter(uid){
+  const c = cache.comptes.find(x=>x.user_id===uid);
+  dialog(`<h3>Créditer ${tel(c.telephone)}</h3><p class="muted">Solde actuel : ${fcfa(c.solde)}. Geste commercial, remboursement, paiement reçu en espèces… Un montant négatif corrige une erreur.</p>
+    <label for="cm">Montant (FCFA)</label><input id="cm" type="number" step="100" value="1000">
+    <label for="cmo">Motif</label><input id="cmo" value="Geste commercial">`,
+    f => { const m = parseInt(f.querySelector("#cm").value,10); if(!m) throw new Error("Montant invalide."); return act("admin_crediter", { p_user: uid, p_montant: m, p_motif: f.querySelector("#cmo").value }, fcfa(m) + " crédités."); }, "Créditer");
+}
+function modifier(uid){
+  const c = cache.comptes.find(x=>x.user_id===uid);
+  dialog(`<h3>Modifier ${tel(c.telephone)}</h3>
+    <label for="mNote">Note interne</label><input id="mNote" value="${esc(c.note||"")}">
+    <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input id="mOff" type="checkbox" style="width:auto"> Offrir à nouveau l'export gratuit</label>
+    <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input id="mSusp" type="checkbox" style="width:auto" ${c.suspendu?"checked":""}> Compte suspendu (exports bloqués)</label>`,
+    f => act("admin_modifier_compte", { p_user: uid, p_suspendu: f.querySelector("#mSusp").checked, p_note: f.querySelector("#mNote").value, p_offerts: f.querySelector("#mOff").checked ? 0 : null }, "Compte mis à jour."), "Enregistrer");
+}
+async function saveParams(){
+  const b=$("saveParams"); b.disabled=true;
+  try {
+    for (const [k] of PARAMS) {
+      let v = $("p_"+k).value.trim();
+      if (/^numero_/.test(k) && v) { const p=phone9(v); if(!p) throw new Error("Numéro invalide : " + v); v=p; }
+      if (/prix|seuil|offerts|recharge/.test(k) && !/^\d+$/.test(v)) throw new Error("Valeur numérique attendue : « " + k + " ».");
+      await rpc("admin_parametre", { p_cle: k, p_valeur: v });
+    }
+    flash("Paramètres enregistrés."); await load(true);
+  } catch(e){ flash(e.message, "err"); b.disabled=false; }
+}
+
+// ---------- Démonstration (données fictives, rien n'est envoyé) ----------
+const Demo = (() => {
+  const now = Date.now(), J = 864e5, iso = t => new Date(t).toISOString();
+  const u = i => "00000000-0000-0000-0000-00000000000" + i;
+  const comptes = [
+    {user_id:u(1),telephone:"690112233",solde:3500,offerts_utilises:1,suspendu:false,note:"Boutique Akwa",cree:iso(now-80*J),exports:14,depense:9500,dernier_export:iso(now-1*J),recharges_en_attente:0,appareils:2,dernier_sync:now-2*36e5},
+    {user_id:u(2),telephone:"677445566",solde:0,offerts_utilises:1,suspendu:false,note:"",cree:iso(now-6*J),exports:1,depense:0,dernier_export:iso(now-5*J),recharges_en_attente:1,appareils:1,dernier_sync:now-30*6e4},
+    {user_id:u(3),telephone:"655778899",solde:-500,offerts_utilises:1,suspendu:false,note:"Relancer",cree:iso(now-140*J),exports:9,depense:6000,dernier_export:iso(now-3*J),recharges_en_attente:0,appareils:1,dernier_sync:now-4*J},
+    {user_id:u(4),telephone:"699001122",solde:12000,offerts_utilises:1,suspendu:false,note:"Agent Mvog-Mbi",cree:iso(now-200*J),exports:31,depense:28000,dernier_export:iso(now-36e5),recharges_en_attente:0,appareils:3,dernier_sync:now-5*6e4},
+    {user_id:u(5),telephone:"681223344",solde:0,offerts_utilises:0,suspendu:false,note:"",cree:iso(now-2*J),exports:0,depense:0,dernier_export:null,recharges_en_attente:0,appareils:1,dernier_sync:now-3*36e5}];
+  const recharges = [
+    {id:12,user_id:u(2),telephone:"677445566",operateur:"OM",reference:"PP251114.1842.C48211",montant:5000,statut:"en_attente",motif:"",cree:iso(now-3*36e5),traite:null,solde:0},
+    {id:11,user_id:u(1),telephone:"690112233",operateur:"MOMO",reference:"8472619305",montant:5000,statut:"valide",motif:"",cree:iso(now-9*J),traite:iso(now-9*J+2*36e5),solde:3500},
+    {id:10,user_id:u(4),telephone:"699001122",operateur:"ADMIN",reference:"ADMIN-x",montant:2000,statut:"valide",motif:"Geste commercial",cree:iso(now-12*J),traite:iso(now-12*J),solde:12000},
+    {id:9,user_id:u(3),telephone:"655778899",operateur:"OM",reference:"PP251020.0911.A10392",montant:2000,statut:"refuse",motif:"ID introuvable dans l'historique",cree:iso(now-25*J),traite:iso(now-24*J),solde:-500}];
+  const exports = [
+    {id:"e1",telephone:"699001122",nb_operations:312,periode:"Ce mois (depuis le 01/11/2026)",prix:1000,offert:false,hors_ligne:false,date_export:iso(now-36e5)},
+    {id:"e2",telephone:"690112233",nb_operations:58,periode:"Aujourd'hui",prix:500,offert:false,hors_ligne:false,date_export:iso(now-1*J)},
+    {id:"e3",telephone:"655778899",nb_operations:240,periode:"7 jours",prix:1000,offert:false,hors_ligne:true,date_export:iso(now-3*J)},
+    {id:"e4",telephone:"677445566",nb_operations:410,periode:"Tout l'historique",prix:0,offert:true,hors_ligne:false,date_export:iso(now-5*J)}];
+  const appareils = [
+    {telephone:"690112233",modele:"TECNO Spark 20",android:"13",version_app:"0.6",dernier_sync:now-2*36e5,cree:iso(now-80*J)},
+    {telephone:"655778899",modele:"itel A70",android:"13",version_app:"0.6",dernier_sync:now-4*J,cree:iso(now-140*J)},
+    {telephone:"699001122",modele:"Infinix Hot 40",android:"13",version_app:"0.6",dernier_sync:now-5*6e4,cree:iso(now-200*J)}];
+  const incidents = [
+    {telephone:"655778899",type:"SAUVEGARDE_ECHEC",message:"Pas de connexion internet ou serveur injoignable.",version_app:"0.6",cree:iso(now-30*36e5)},
+    {telephone:"677445566",type:"SMS_NON_RECONNUS",message:"3 SMS mobile money non reconnus sur ce téléphone (contenu non transmis).",version_app:"0.6",cree:iso(now-2*J)}];
+  const parametres = [{cle:"nom_marchand",valeur:"Carnet Mobile Money"},{cle:"numero_om",valeur:"690000000"},{cle:"numero_momo",valeur:"670000000"},{cle:"prix_export_petit",valeur:"500"},{cle:"seuil_export",valeur:"200"},{cle:"prix_export_grand",valeur:"1000"},{cle:"exports_offerts",valeur:"1"},{cle:"recharge_min",valeur:"500"}];
+  const stats = {comptes:5,nouveaux_7_jours:2,clients_payants:3,soldes_total:15500,soldes_negatifs:1,recharges_en_attente:1,montant_en_attente:5000,recharges_mois:5000,exports_mois:4,exports_payants_mois:3,revenu_exports_mois:2500,appareils:3,appareils_silencieux:1,incidents_7_jours:2};
+  return { rpc: async (n) => ({admin_stats:stats,admin_comptes:comptes,admin_recharges:recharges,admin_exports:exports,admin_appareils:appareils,admin_incidents:incidents,parametres})[n] ?? null };
+})();
+
+init();
+</script>
+</body>
+</html>

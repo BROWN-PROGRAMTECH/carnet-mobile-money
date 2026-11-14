@@ -10,8 +10,8 @@ android {
         applicationId 'cm.carnet.mobilemoney'
         minSdk 26
         targetSdk 34
-        versionCode 5
-        versionName '0.4.1'
+        versionCode 7
+        versionName '0.6'
     }
 
     // Clé de test fixe : permet d'installer les nouvelles versions par-dessus l'ancienne.

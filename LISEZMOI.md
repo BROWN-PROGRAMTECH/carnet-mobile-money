@@ -2,6 +2,39 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Nouveautés de la version 0.6 : export payant, porte-monnaie et nouvelle interface
+
+**Modèle économique**
+- L'application est **gratuite** : lecture des SMS, caisse, classement, espèces, sauvegarde.
+- Seul l'**export Excel** est payant, **à chaque fichier** : 1 à 200 opérations = **500 FCFA**, plus de 200 = **1 000 FCFA** (réglable dans le tableau de bord). **Le premier export est offert.**
+- **Porte-monnaie prépayé** : le client envoie par exemple 5 000 FCFA par Orange Money ou MoMo à votre numéro, recopie l'ID de transaction dans l'application, vous validez une fois, puis chaque export se débite **instantanément**.
+- **Sans réseau**, l'export passe sur le dernier solde connu ; le débit est envoyé au retour du réseau (un même export n'est jamais débité deux fois).
+- Le montant n'est débité qu'au moment où le fichier est enregistré ; si le débit est refusé, le fichier vide est supprimé.
+- L'export Excel nécessite un compte (gratuit). Les exports CSV et « SMS anonymisés » sont retirés.
+
+**Interface**
+- **Barre de navigation fixe en bas** : Caisse · À classer (pastille avec le nombre) · Exporter · Compte. Plus de menu « Plus… ».
+- **Plus de messages flottants** : un bandeau dans l'écran, que l'on touche pour fermer.
+- Caisse : grande carte « Résultat », cartes Orange Money / MoMo côte à côte (touchez pour le détail), carte Espèces avec ses boutons, puis Journal / Espèces / À vérifier.
+- Exporter : nombre d'opérations, prix, solde après export, recharge guidée en 3 étapes, historique.
+- Compte : connexion, sauvegarde, réglages de la caisse et de la lecture des SMS au même endroit.
+
+**Correction importante** : la sauvegarde en ligne s'arrêtait après 500 SMS (les SMS lus en une fois ont la même date de modification). Elle reprend maintenant exactement où elle s'était arrêtée, et **les SMS manquants partent tout seuls** à la prochaine sauvegarde.
+
+### Mise en place
+
+1. **Serveur** : le fichier `supabase/portefeuille.sql` **a déjà été exécuté sur votre projet** `carnet-mobile-money`. Pour un autre projet : SQL Editor → collez-le → Run.
+2. **Devenir superadmin** (une fois) : SQL Editor →
+   ```sql
+   insert into public.admin (user_id)
+   select id from auth.users where email = '2376XXXXXXXX@carnet-mm.app';
+   ```
+3. **Tableau de bord** : GitHub → Settings → Pages → Deploy from a branch → main, dossier `/docs` → Save. Ouvrez `https://<votre-compte>.github.io/<dépôt>/admin/`. L'adresse et la clé publique du projet sont déjà dans la page.
+4. Onglet **Paramètres** : saisissez vos numéros Orange Money et MoMo qui reçoivent les recharges (sinon l'écran Recharger dit « numéros pas encore disponibles »).
+
+> Le fichier `CloudConfig.java` n'est **pas** dans ce zip : gardez celui du dépôt, qui contient déjà vos valeurs.
+> Supprimez du dépôt `supabase/abonnement.sql` et `app/src/main/java/cm/carnet/mobilemoney/Licence.java` s'ils y sont (la version 0.5 n'est plus utilisée).
+
 ## Nouveautés de la version 0.4.1 : ouverture rapide
 
 - **Ouverture immédiate** : la caisse s'affiche tout de suite à partir des données déjà enregistrées dans l'application.

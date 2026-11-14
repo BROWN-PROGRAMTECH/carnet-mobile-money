@@ -346,9 +346,16 @@ public final class Store extends SQLiteOpenHelper {
     };
 
     /** Lignes modifiées après "since", par ordre de modification. Valeurs : String, Long ou null. */
-    public List<Object[]> changedSince(Spec s, long since, int limit) {
+    /**
+     * Lignes modifiées après la position (since, sinceKey), triées par (maj, clé).
+     * La clé départage les nombreuses lignes enregistrées à la même milliseconde (lecture de la messagerie) :
+     * sans elle, la sauvegarde s'arrêtait après le premier lot de 500.
+     */
+    public List<Object[]> changedSince(Spec s, long since, String sinceKey, int limit) {
         List<Object[]> out = new ArrayList<>();
-        Cursor c = getReadableDatabase().query(s.table, s.cols, "maj > ?", new String[] {String.valueOf(since)}, null, null, "maj ASC", String.valueOf(limit));
+        String t = String.valueOf(since);
+        Cursor c = getReadableDatabase().query(s.table, s.cols, "maj > ? OR (maj = ? AND " + s.key + " > ?)",
+                new String[] {t, t, sinceKey == null ? "" : sinceKey}, null, null, "maj ASC, " + s.key + " ASC", String.valueOf(limit));
         try {
             while (c.moveToNext()) {
                 Object[] row = new Object[s.cols.length];
