@@ -30,15 +30,18 @@ public class SmsReceiver extends BroadcastReceiver {
             int sub = intent.getIntExtra("subscription", intent.getIntExtra("android.telephony.extra.SUBSCRIPTION_INDEX", -1));
 
             SmsParser.Sms sms = new SmsParser.Sms(address, body.toString(), System.currentTimeMillis(), sub >= 0 ? String.valueOf(sub) : "");
-            String op = SmsParser.detectOp(sms.address, sms.body, Store.config(ctx));
+            SmsParser.Config cfg = Store.config(ctx);
+            String op = SmsParser.detectOp(sms.address, sms.body, cfg);
             if (op == null) return;
             boolean isNew = Store.get(ctx).insert(sms);
             ctx.sendBroadcast(new Intent(ACTION_NEW).setPackage(ctx.getPackageName()));
             if (!isNew) return;
 
             sms.op = op;
-            Txn t = SmsParser.parse(sms);
-            if (t.kind == Txn.TX) {
+            Txn t = SmsParser.parse(sms, cfg);
+            if (t.kind == Txn.TX && t.isBalanceCheck()) {
+                notify(ctx, Txn.opName(op) + " : solde " + SmsParser.fmt(t.solde) + " FCFA", "Consultation de solde enregistrée.");
+            } else if (t.kind == Txn.TX) {
                 String sens = t.sens > 0 ? "+" : (t.sens < 0 ? "−" : "");
                 String who = t.nom != null ? t.nom : (t.numero != null ? t.numero : "");
                 notify(ctx, Txn.opName(op) + " : " + sens + SmsParser.fmt(t.montant) + " FCFA",

@@ -2,6 +2,18 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Nouveautés de la version 0.2
+
+- Un seul compte par opérateur : l'identifiant de SIM d'Android, qui change avec le téléphone ou la carte, n'éclate plus un compte en plusieurs « SIM ».
+- Lecture refaite à partir de vrais SMS 2026 : transferts OM reçus ou envoyés selon le numéro du titulaire (détecté automatiquement, modifiable dans Réglages), type d'opération OM lu dans le préfixe de l'ID (PP, CI, CO, MP, RC), ID MoMo séparés du texte publicitaire, montants avec centimes.
+- Les consultations de solde servent de points de contrôle du solde réel au lieu d'être comptées comme des entrées.
+- Les SMS de crédit téléphonique (« airtime ») et les doublons de paires de SMS MoMo ne faussent plus les totaux.
+- Choix de la période : Aujourd'hui, 7 jours, Ce mois, Tout, ou « Période précise… » (date de début puis date de fin). Le solde d'ouverture est repris du dernier SMS avant la période ; l'écran et l'export Excel suivent la période choisie.
+- Export Excel (.xlsx) par défaut : onglets Synthèse, Journal et À vérifier. CSV et SMS anonymisés dans « Plus… ».
+- Testé sur une sauvegarde réelle de 995 SMS : MoMo écart 0 FCFA ; Orange Money écart −2 006 FCFA, expliqué par deux SMS absents signalés dans le journal.
+
+Pour mettre à jour : déposez le contenu du zip dans le dépôt (les fichiers existants sont remplacés). L'APK 0.2 s'installe par-dessus la 0.1, sans désinstaller.
+
 ## Ce que fait le prototype
 
 - Au premier lancement, relit la messagerie et retient uniquement les SMS Orange Money et MTN MoMo.

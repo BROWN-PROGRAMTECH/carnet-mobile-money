@@ -87,7 +87,15 @@ public final class Store extends SQLiteOpenHelper {
 
     public static SmsParser.Config config(Context ctx) {
         SharedPreferences p = ctx.getSharedPreferences("reglages", Context.MODE_PRIVATE);
-        return SmsParser.Config.of(p.getString("om", SmsParser.DEFAULT_OM), p.getString("momo", SmsParser.DEFAULT_MOMO), p.getBoolean("auto", true));
+        SmsParser.Config c = SmsParser.Config.of(p.getString("om", SmsParser.DEFAULT_OM), p.getString("momo", SmsParser.DEFAULT_MOMO), p.getBoolean("auto", false));
+        String manual = p.getString("ownerOm", "").replaceAll("\\D", "");
+        if (manual.length() > 9) manual = manual.substring(manual.length() - 9);
+        c.ownerOm = manual.matches("6\\d{8}") ? manual : p.getString("ownerOmAuto", "");
+        return c;
+    }
+
+    public static void savePref(Context ctx, String key, String value) {
+        ctx.getSharedPreferences("reglages", Context.MODE_PRIVATE).edit().putString(key, value).apply();
     }
 
     public static String pref(Context ctx, String key, String def) {
@@ -98,8 +106,8 @@ public final class Store extends SQLiteOpenHelper {
         return ctx.getSharedPreferences("reglages", Context.MODE_PRIVATE).getBoolean(key, def);
     }
 
-    public static void saveConfig(Context ctx, String om, String momo, boolean auto) {
+    public static void saveConfig(Context ctx, String om, String momo, boolean auto, String ownerOm) {
         ctx.getSharedPreferences("reglages", Context.MODE_PRIVATE).edit()
-                .putString("om", om).putString("momo", momo).putBoolean("auto", auto).apply();
+                .putString("om", om).putString("momo", momo).putBoolean("auto", auto).putString("ownerOm", ownerOm).apply();
     }
 }
