@@ -2,6 +2,12 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Version 0.6.1 : protection contre les fermetures
+
+- Si une page ne peut pas s'afficher, l'application reste ouverte et affiche l'erreur au lieu de se fermer.
+- Après une fermeture inattendue, un écran montre le détail au lancement suivant, avec le bouton « Rouvrir l'application ».
+- Le détail technique (jamais de SMS ni de données de caisse) est envoyé au support avec la sauvegarde ; il apparaît dans l'onglet Incidents du tableau de bord.
+
 ## Nouveautés de la version 0.6 : export payant, porte-monnaie et nouvelle interface
 
 **Modèle économique**

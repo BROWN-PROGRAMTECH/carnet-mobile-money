@@ -26,7 +26,7 @@ import java.util.UUID;
 public final class Cloud {
     private Cloud() {}
 
-    public static final String VERSION_APP = "0.6";
+    public static final String VERSION_APP = "0.6.1";
     private static final String DOMAIN = "@carnet-mm.app";
     private static final int PAGE = 1000, BATCH = 500;
 
@@ -220,6 +220,7 @@ public final class Cloud {
                 }
             }
             registerDevice(c, tok, userId);
+            envoyerPlantages(c, tok, userId);
             try { envoyerExportsEnAttente(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
             envoyerIncidents(c, tok, userId);
         } catch (CloudException e) {
@@ -462,6 +463,30 @@ public final class Cloud {
             }
         } catch (Exception ignored) {
             // Un incident non transmis le sera à la prochaine sauvegarde.
+        }
+    }
+
+    /** Envoie au support la dernière erreur mémorisée (pile d'appels uniquement, aucune donnée de caisse). */
+    public static void envoyerPlantages(Context ctx) {
+        Context c = ctx.getApplicationContext();
+        if (!configured() || !loggedIn(c)) return;
+        try { envoyerPlantages(c, token(c), prefs(c).getString("user_id", "")); } catch (Exception ignored) {}
+    }
+
+    private static void envoyerPlantages(Context c, String tok, String userId) {
+        String trace = Crash.aEnvoyer(c);
+        if (trace == null || userId.isEmpty()) return;
+        try {
+            JSONObject o = new JSONObject();
+            o.put("user_id", userId);
+            o.put("device_id", deviceId(c));
+            o.put("type", trace.startsWith("PLANTAGE") ? "PLANTAGE" : "ERREUR_AFFICHAGE");
+            o.put("message", trace.length() > 4000 ? trace.substring(0, 4000) : trace);
+            o.put("version_app", VERSION_APP);
+            http("POST", "/rest/v1/incident", new JSONArray().put(o).toString(), tok, "return=minimal");
+            Crash.marquerEnvoye(c);
+        } catch (Exception ignored) {
+            // Renvoyé à la prochaine sauvegarde.
         }
     }
 

@@ -285,12 +285,12 @@ function appareils(){
     </tbody></table></div>`;
 }
 
-const TYPES_INCIDENT = {SAUVEGARDE_ECHEC:"Échec de sauvegarde", SMS_NON_RECONNUS:"SMS non reconnus"};
+const TYPES_INCIDENT = {SAUVEGARDE_ECHEC:"Échec de sauvegarde", SMS_NON_RECONNUS:"SMS non reconnus", PLANTAGE:"Fermeture de l'application", ERREUR_AFFICHAGE:"Erreur d'affichage"};
 function incidents(){
   const rows = cache.incidents||[];
   return `<p class="muted">30 derniers jours. Les incidents ne contiennent jamais le texte des SMS ni les transactions des clients.</p>
     <div class="tablewrap"><table><thead><tr><th>Date</th><th>Numéro</th><th>Type</th><th>Message</th><th>Version</th></tr></thead><tbody>
-    ${rows.map(i=>`<tr><td>${dt(i.cree)}</td><td>${tel(i.telephone)}</td><td>${esc(TYPES_INCIDENT[i.type]||i.type)}</td><td>${esc(i.message||"")}</td><td class="mono">${esc(i.version_app||"")}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">Aucun incident.</td></tr>`}
+    ${rows.map(i=>`<tr><td>${dt(i.cree)}</td><td>${tel(i.telephone)}</td><td>${esc(TYPES_INCIDENT[i.type]||i.type)}</td><td style="white-space:pre-wrap;max-width:520px;font-size:12px">${esc(i.message||"")}</td><td class="mono">${esc(i.version_app||"")}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">Aucun incident.</td></tr>`}
     </tbody></table></div>`;
 }
 

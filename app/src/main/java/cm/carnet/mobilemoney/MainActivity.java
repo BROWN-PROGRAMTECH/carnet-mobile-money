@@ -78,7 +78,7 @@ public class MainActivity extends Activity {
     private final TextView[] navLabels = new TextView[4];
     private int period = 0, pageIdx = PAGE_CAISSE, liste = LISTE_JOURNAL;
     private long customFrom, customTo;
-    private boolean loading, rechargeOuverte, avanceOuvert;
+    private boolean loading, rechargeOuverte, avanceOuvert, uiPrete;
     private String rechargeOp = "OM";
     private final java.util.Set<String> comptesOuverts = new java.util.HashSet<>();
     private final Runnable hideNotice = () -> noticeText.setVisibility(View.GONE);
@@ -117,12 +117,46 @@ public class MainActivity extends Activity {
         customFrom = Store.prefLong(this, "debut", 0);
         customTo = Store.prefLong(this, "fin", 0);
         if (period < 0 || period > CUSTOM || (period == CUSTOM && customTo <= 0)) period = 0;
-        buildUi();
+        Crash.install(this);
+        String trace = Crash.aAfficher(this);
+        if (trace != null) {
+            showCrashScreen(trace);
+            return;
+        }
+        try {
+            buildUi();
+            uiPrete = true;
+        } catch (RuntimeException e) {
+            Crash.enregistrer(this, Thread.currentThread(), e, true);
+            showCrashScreen(Crash.aAfficher(this));
+        }
+    }
+
+    /** Écran affiché après un plantage : le détail est envoyé au support, puis l'application est rouverte. */
+    private void showCrashScreen(String trace) {
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(BG);
+        LinearLayout box = column(12);
+        box.setPadding(dp(20), dp(28), dp(20), dp(28));
+        sv.addView(box, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        setContentView(sv);
+        box.addView(text("L'application s'est fermée à cause d'une erreur", 20, INK, true));
+        box.addView(text("Vos données ne sont pas touchées. Le détail technique ci-dessous est envoyé automatiquement au support"
+                + " dès qu'il y a du réseau (si vous êtes connecté à votre compte). Vous pouvez aussi en faire une capture d'écran.", 14, MUTED, false));
+        box.addView(button("Rouvrir l'application", true, v -> { Crash.marquerAffiche(this); recreate(); }), fill());
+        TextView t = text(trace == null ? "" : trace, 11, INK, false);
+        t.setTypeface(Typeface.MONOSPACE);
+        t.setTextIsSelectable(true);
+        t.setBackground(box(SURFACE, LINE, 10));
+        t.setPadding(dp(12), dp(10), dp(12), dp(10));
+        box.addView(t, fill());
+        io.execute(() -> Cloud.envoyerPlantages(this));
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        if (!uiPrete) return;
         IntentFilter f = new IntentFilter(SmsReceiver.ACTION_NEW);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(onNewSms, f, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(onNewSms, f);
@@ -656,7 +690,32 @@ public class MainActivity extends Activity {
 
     // ---------- Affichage ----------
 
+    /** Affiche la page ; une erreur d'affichage est montrée et signalée au lieu de fermer l'application. */
     private void render() {
+        if (!uiPrete) return;
+        try {
+            renderPage();
+        } catch (RuntimeException e) {
+            Crash.enregistrer(this, Thread.currentThread(), e, false);
+            io.execute(() -> Cloud.envoyerPlantages(this));
+            page.removeAllViews();
+            LinearLayout c = column(8);
+            c.setBackground(box(BAD_BG, 0, 14));
+            c.setPadding(dp(16), dp(14), dp(16), dp(14));
+            c.addView(text("Cette page n'a pas pu s'afficher", 16, BAD, true));
+            c.addView(text("Le détail a été envoyé au support. Les autres onglets restent utilisables.", 13, INK, false));
+            StringBuilder sb = new StringBuilder(e.toString());
+            StackTraceElement[] st = e.getStackTrace();
+            for (int i = 0; i < Math.min(6, st.length); i++) sb.append("\n  at ").append(st[i]);
+            TextView t = text(sb.toString(), 11, INK, false);
+            t.setTypeface(Typeface.MONOSPACE);
+            t.setTextIsSelectable(true);
+            c.addView(t, fill());
+            page.addView(c, fill());
+        }
+    }
+
+    private void renderPage() {
         periodScroll.setVisibility(pageIdx == PAGE_COMPTE ? View.GONE : View.VISIBLE);
         for (int i = 0; i < periodChips.length; i++) {
             boolean on = i == period;
