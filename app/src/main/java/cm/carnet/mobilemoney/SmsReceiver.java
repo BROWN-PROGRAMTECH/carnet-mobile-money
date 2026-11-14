@@ -36,6 +36,7 @@ public class SmsReceiver extends BroadcastReceiver {
             boolean isNew = Store.get(ctx).insert(sms);
             ctx.sendBroadcast(new Intent(ACTION_NEW).setPackage(ctx.getPackageName()));
             if (!isNew) return;
+            SyncJob.soon(ctx);
 
             sms.op = op;
             Txn t = SmsParser.parse(sms, cfg);

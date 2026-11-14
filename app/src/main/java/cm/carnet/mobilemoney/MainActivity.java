@@ -65,7 +65,7 @@ public class MainActivity extends Activity {
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private LinearLayout permBox, cards, list;
-    private TextView status;
+    private TextView status, cloudLine;
     private final Button[] tabs = new Button[4];
     private final Button[] periodButtons = new Button[PERIODS.length];
     private Button customButton;
@@ -106,6 +106,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(onNewSms, f, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(onNewSms, f);
         refreshPermissionState();
+        autoSync();
     }
 
     @Override
@@ -176,29 +177,45 @@ public class MainActivity extends Activity {
 
     // ---------- Chargement ----------
 
+    /** Mémoire de lecture des SMS, chargée une fois puis complétée au fil de l'eau. */
+    private Analyzer.Cache lecture;
+    /** Ce qui a servi à la dernière analyse : si rien n'a changé, on ne réanalyse pas. */
+    private String analysedKey = "";
+    private boolean pendingImport;
+
+    /**
+     * Ouverture rapide : affiche d'abord ce qui est déjà en mémoire, puis cherche seulement les SMS
+     * arrivés depuis la dernière lecture.
+     */
     private void reload(boolean importInbox) {
-        if (loading) return;
+        if (loading) {
+            pendingImport |= importInbox;
+            return;
+        }
         loading = true;
-        if (importInbox) status.setText("Lecture de vos SMS…");
+        if (result == null) status.setText("Ouverture de votre caisse…");
         io.execute(() -> {
             String msg;
-            int added = 0;
             try {
-                SmsParser.Config cfg = Store.config(this);
-                if (importInbox && hasSmsPermission()) added = importInbox(cfg);
                 Store store = Store.get(this);
-                Analyzer.Result r = Analyzer.analyse(store.all(), cfg);
-                if (!r.ownerOm.isEmpty()) Store.savePref(this, "ownerOmAuto", r.ownerOm);
-                Map<String, Caisse.Classement> cl = store.classements();
-                Map<String, String> rg = store.regles();
-                List<Caisse.Saisie> s = store.saisies();
-                List<Caisse.Jour> j = store.jours();
-                result = r;
-                classements = cl;
-                regles = rg;
-                saisies = s;
-                jours = j;
-                msg = r.tx.size() + " opérations lues dans les SMS" + (added > 0 ? " · " + added + " nouveaux SMS" : "");
+                SmsParser.Config cfg = Store.config(this);
+
+                // 1. Afficher tout de suite ce qui est déjà enregistré.
+                Analyzer.Result r = analyseStored(store, cfg);
+                loadCaisse(store);
+                final boolean first = Store.prefLong(this, "inboxDernier", 0) == 0;
+                final String early = importInbox && hasSmsPermission()
+                        ? (first ? "Première lecture de votre messagerie, une seule fois…" : "Recherche de nouveaux SMS…")
+                        : r.tx.size() + " opérations";
+                runOnUiThread(() -> { status.setText(early); render(); });
+
+                // 2. Lire seulement les nouveaux SMS.
+                int added = 0;
+                if (importInbox && hasSmsPermission()) {
+                    added = importInbox(cfg);
+                    if (added > 0) r = analyseStored(store, Store.config(this));
+                }
+                msg = r.tx.size() + " opérations" + (added > 0 ? " · " + added + " nouveau(x) SMS" : " · à jour");
                 if (r.scanned == 0 && !hasSmsPermission()) msg = "Autorisez la lecture des SMS pour commencer.";
             } catch (Exception e) {
                 msg = "Erreur de lecture : " + e.getMessage();
@@ -208,34 +225,109 @@ public class MainActivity extends Activity {
                 loading = false;
                 status.setText(m);
                 render();
+                if (pendingImport) {
+                    pendingImport = false;
+                    reload(true);
+                }
             });
         });
     }
 
+    /** Analyse les SMS enregistrés en réutilisant la mémoire de lecture ; ne refait rien si rien n'a changé. */
+    private Analyzer.Result analyseStored(Store store, SmsParser.Config cfg) {
+        String key = cfg.om + "|" + cfg.momo + "|" + cfg.auto + "|" + cfg.ownerOm + "|" + store.count();
+        Analyzer.Result current = result;
+        if (current != null && key.equals(analysedKey)) return current;
+        if (lecture == null) lecture = store.lecture(this);
+        Analyzer.Result r = Analyzer.analyse(store.all(), cfg, lecture);
+        store.saveLecture(this, lecture);
+        if (!r.ownerOm.isEmpty()) Store.savePref(this, "ownerOmAuto", r.ownerOm);
+        result = r;
+        analysedKey = key;
+        return r;
+    }
+
+    private void loadCaisse(Store store) {
+        Map<String, Caisse.Classement> cl = store.classements();
+        Map<String, String> rg = store.regles();
+        List<Caisse.Saisie> s = store.saisies();
+        List<Caisse.Jour> j = store.jours();
+        classements = cl;
+        regles = rg;
+        saisies = s;
+        jours = j;
+    }
+
+    /** Oublie la position de lecture : la prochaine actualisation relira toute la messagerie (une fois). */
+    private void resetInbox() {
+        Store.savePref(this, "inboxDernier", "0");
+        analysedKey = "";
+    }
+
+    /**
+     * Copie les SMS Orange Money et MoMo de la messagerie vers l'application.
+     * Seuls les SMS reçus depuis la dernière lecture sont parcourus, et seulement ceux des expéditeurs connus.
+     */
     private int importInbox(SmsParser.Config cfg) {
-        Cursor c;
+        long since = Store.prefLong(this, "inboxDernier", 0);
+        List<String> where = new ArrayList<>();
+        List<String> args = new ArrayList<>();
+        if (since > 0) {
+            where.add("date > ?");
+            args.add(String.valueOf(since - 60000L));
+        }
+        String dateOnly = where.isEmpty() ? null : where.get(0);
+        String[] dateArgs = args.isEmpty() ? null : args.toArray(new String[0]);
+        if (!cfg.auto) {
+            List<String> keys = new ArrayList<>();
+            for (String x : cfg.om) keys.add(SmsParser.senderKey(x));
+            for (String x : cfg.momo) keys.add(SmsParser.senderKey(x));
+            if (!keys.isEmpty()) {
+                StringBuilder in = new StringBuilder();
+                for (int i = 0; i < keys.size(); i++) in.append(i == 0 ? "?" : ",?");
+                where.add("LOWER(REPLACE(REPLACE(address, ' ', ''), '-', '')) IN (" + in + ")");
+                args.addAll(keys);
+            }
+        }
+        String sel = where.isEmpty() ? null : String.join(" AND ", where);
+        String[] selArgs = args.isEmpty() ? null : args.toArray(new String[0]);
+
+        Cursor c = null;
         boolean withSub = true;
+        String[] withSubCols = {"address", "body", "date", "sub_id"}, noSubCols = {"address", "body", "date"};
         try {
-            c = getContentResolver().query(Telephony.Sms.Inbox.CONTENT_URI, new String[] {"address", "body", "date", "sub_id"}, null, null, "date DESC");
+            c = getContentResolver().query(Telephony.Sms.Inbox.CONTENT_URI, withSubCols, sel, selArgs, "date DESC");
         } catch (Exception e) {
             withSub = false;
-            c = getContentResolver().query(Telephony.Sms.Inbox.CONTENT_URI, new String[] {"address", "body", "date"}, null, null, "date DESC");
+        }
+        if (c == null) {
+            // Certains téléphones refusent la colonne sub_id ou le filtre par expéditeur : on simplifie.
+            try {
+                c = getContentResolver().query(Telephony.Sms.Inbox.CONTENT_URI, noSubCols, sel, selArgs, "date DESC");
+            } catch (Exception e) {
+                c = getContentResolver().query(Telephony.Sms.Inbox.CONTENT_URI, noSubCols, dateOnly, dateArgs, "date DESC");
+            }
+            withSub = false;
         }
         if (c == null) return 0;
         int added = 0, n = 0;
+        long newest = since;
         Store store = Store.get(this);
         try {
-            while (c.moveToNext() && n++ < 30000) {
+            while (c.moveToNext() && n++ < 50000) {
+                long date = c.getLong(2);
+                if (date > newest) newest = date;
                 String address = c.getString(0), body = c.getString(1);
                 if (body == null) continue;
                 if (SmsParser.detectOp(address, body, cfg) == null) continue;
                 String sub = withSub && !c.isNull(3) ? c.getString(3) : "";
                 if ("-1".equals(sub)) sub = "";
-                if (store.insert(new SmsParser.Sms(address, body, c.getLong(2), sub))) added++;
+                if (store.insert(new SmsParser.Sms(address, body, date, sub))) added++;
             }
         } finally {
             c.close();
         }
+        if (newest > since) Store.savePref(this, "inboxDernier", String.valueOf(newest));
         return added;
     }
 
@@ -424,7 +516,7 @@ public class MainActivity extends Activity {
         permBox.setBackground(box(WARN_BG, 0, 14));
         permBox.setPadding(dp(16), dp(16), dp(16), dp(16));
         permBox.addView(text("Autorisation nécessaire", 16, INK, true));
-        permBox.addView(text("L'application lit uniquement les SMS des expéditeurs Orange Money et MTN MoMo. Les autres SMS ne sont ni lus ni enregistrés, et rien n'est envoyé sur internet.", 14, INK, false));
+        permBox.addView(text("L'application lit uniquement les SMS des expéditeurs Orange Money et MTN MoMo. Les autres SMS ne sont ni lus ni enregistrés. Sans compte, rien n'est envoyé sur internet.", 14, INK, false));
         permBox.addView(button("Autoriser la lecture des SMS", true, v -> askPermissions()), fill());
         permBox.addView(text("Si l'autorisation est grisée ou refusée : ouvrez les paramètres de l'application, touchez le menu ⋮ en haut à droite, choisissez « Autoriser les paramètres restreints », puis activez SMS dans Autorisations.", 13, MUTED, false));
         permBox.addView(button("Ouvrir les paramètres de l'application", false, v ->
@@ -445,6 +537,10 @@ public class MainActivity extends Activity {
 
         status = text("", 13, MUTED, false);
         root.addView(status);
+        cloudLine = text("", 13, INK, false);
+        cloudLine.setPadding(dp(12), dp(10), dp(12), dp(10));
+        cloudLine.setOnClickListener(v -> openCompte());
+        root.addView(cloudLine, fill());
 
         cards = column(12);
         root.addView(cards, fill());
@@ -477,12 +573,13 @@ public class MainActivity extends Activity {
         list.setPadding(dp(14), dp(4), dp(14), dp(4));
         root.addView(list, fill());
 
-        root.addView(text("Les montants viennent des SMS de l'opérateur et ne se modifient pas. Touchez une opération pour changer sa catégorie ou son motif. Version 0.3.", 12, MUTED, false));
+        root.addView(text("Les montants viennent des SMS de l'opérateur et ne se modifient pas. Touchez une opération pour changer sa catégorie ou son motif. Version 0.4.1.", 12, MUTED, false));
     }
 
     // ---------- Affichage ----------
 
     private void render() {
+        renderCloud();
         for (int i = 0; i < periodButtons.length; i++) select(periodButtons[i], i == period);
         select(customButton, period == CUSTOM);
         customButton.setText(period == CUSTOM ? "Période : " + periodLabel().toLowerCase(Locale.FRANCE) + " (modifier)" : "Période précise…");
@@ -716,6 +813,7 @@ public class MainActivity extends Activity {
             Store store = Store.get(this);
             store.classer(key, categorie, motif);
             if (toujours && numero != null) store.regle(numero, categorie);
+            SyncJob.soon(this);
             Map<String, Caisse.Classement> cl = store.classements();
             Map<String, String> rg = store.regles();
             runOnUiThread(() -> {
@@ -780,7 +878,7 @@ public class MainActivity extends Activity {
                     boolean always = t.numero != null && toujours.isChecked();
                     if (!always && t.numero != null && regles.containsKey(t.numero)) {
                         final String numero = t.numero;
-                        io.execute(() -> Store.get(this).regle(numero, null));
+                        io.execute(() -> { Store.get(this).regle(numero, null); SyncJob.soon(this); });
                     }
                     classer(t, choix[0], motif.getText().toString().trim(), always && choix[0] != null);
                 })
@@ -852,6 +950,7 @@ public class MainActivity extends Activity {
                     s.libelle = libelle.getText().toString().trim();
                     io.execute(() -> {
                         Store.get(this).addSaisie(s);
+                        SyncJob.soon(this);
                         runOnUiThread(() -> {
                             Toast.makeText(this, (s.sens > 0 ? "Entrée" : "Sortie") + " d'espèces de " + SmsParser.fmt(cents) + " FCFA enregistrée.", Toast.LENGTH_SHORT).show();
                             reload(false);
@@ -869,6 +968,7 @@ public class MainActivity extends Activity {
                         + ". Il restera visible, marqué « Annulé », et ne comptera plus dans la caisse.")
                 .setPositiveButton("Annuler le mouvement", (d, w) -> io.execute(() -> {
                     Store.get(this).annulerSaisie(s.id);
+                    SyncJob.soon(this);
                     runOnUiThread(() -> reload(false));
                 }))
                 .setNegativeButton("Garder", null)
@@ -900,6 +1000,7 @@ public class MainActivity extends Activity {
                     if (cents == null) { Toast.makeText(this, "Montant invalide.", Toast.LENGTH_LONG).show(); return; }
                     io.execute(() -> {
                         Store.get(this).setFond(today, cents);
+                        SyncJob.soon(this);
                         runOnUiThread(() -> reload(false));
                     });
                 })
@@ -933,6 +1034,7 @@ public class MainActivity extends Activity {
                     String n = note.getText().toString().trim();
                     io.execute(() -> {
                         Store.get(this).cloturer(today, cents, n, System.currentTimeMillis());
+                        SyncJob.soon(this);
                         runOnUiThread(() -> {
                             setPeriod(0);
                             reload(false);
@@ -946,6 +1048,149 @@ public class MainActivity extends Activity {
                         });
                     });
                 })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    // ---------- Compte et sauvegarde ----------
+
+    private void renderCloud() {
+        if (!Cloud.configured()) {
+            cloudLine.setText("☁  Sauvegarde en ligne : non configurée dans cette version.");
+            cloudLine.setTextColor(MUTED);
+            cloudLine.setBackground(box(BG, LINE, 10));
+            return;
+        }
+        if (!Cloud.loggedIn(this)) {
+            cloudLine.setText("☁  Vos données ne sont que sur ce téléphone. Touchez ici pour créer un compte et les sauvegarder.");
+            cloudLine.setTextColor(WARN);
+            cloudLine.setBackground(box(WARN_BG, 0, 10));
+            return;
+        }
+        String err = Cloud.lastError(this);
+        long last = Cloud.lastSync(this);
+        String phone = Cloud.phone(this);
+        String who = phone.length() == 9 ? phone.substring(0, 3) + " " + phone.substring(3, 5) + " " + phone.substring(5, 7) + " " + phone.substring(7) : phone;
+        if (!err.isEmpty()) {
+            cloudLine.setText("☁  " + who + " · dernière sauvegarde : " + (last > 0 ? when(last) : "jamais") + ". Problème : " + err);
+            cloudLine.setTextColor(BAD);
+            cloudLine.setBackground(box(BAD_BG, 0, 10));
+        } else {
+            cloudLine.setText("☁  Sauvegardé · " + who + (last > 0 ? " · " + when(last) : ""));
+            cloudLine.setTextColor(GOOD);
+            cloudLine.setBackground(box(GOOD_BG, 0, 10));
+        }
+    }
+
+    /** Sauvegarde à l'ouverture si la dernière date de plus de 15 minutes. */
+    private void autoSync() {
+        if (!Cloud.configured() || !Cloud.loggedIn(this)) return;
+        SyncJob.schedule(this);
+        if (System.currentTimeMillis() - Cloud.lastSync(this) < 15 * 60000L) return;
+        io.execute(() -> {
+            try { Cloud.sync(this); } catch (Exception ignored) {}
+            runOnUiThread(() -> reload(false));
+        });
+    }
+
+    private void syncNow() {
+        cloudLine.setText("☁  Sauvegarde en cours…");
+        io.execute(() -> {
+            String msg;
+            try {
+                msg = "Sauvegarde terminée : " + Cloud.sync(this);
+            } catch (Cloud.CloudException e) {
+                msg = e.getMessage();
+            }
+            final String m = msg;
+            runOnUiThread(() -> {
+                Toast.makeText(this, m, Toast.LENGTH_LONG).show();
+                reload(false);
+            });
+        });
+    }
+
+    private void openCompte() {
+        if (!Cloud.configured()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Sauvegarde en ligne")
+                    .setMessage("Cette version de l'application n'est pas encore reliée à un serveur. Renseignez l'adresse et la clé de votre projet Supabase dans le fichier CloudConfig.java, puis recompilez (voir le guide LISEZMOI).")
+                    .setPositiveButton("Compris", null)
+                    .show();
+            return;
+        }
+        if (Cloud.loggedIn(this)) {
+            long last = Cloud.lastSync(this);
+            String err = Cloud.lastError(this);
+            new AlertDialog.Builder(this)
+                    .setTitle("Compte et sauvegarde")
+                    .setMessage("Connecté avec le numéro " + Cloud.phone(this) + ".\nDernière sauvegarde : " + (last > 0 ? when(last) : "jamais") + "."
+                            + (err.isEmpty() ? "" : "\nDernier problème : " + err)
+                            + "\n\nLa sauvegarde se fait toute seule dès qu'il y a du réseau. Sur un nouveau téléphone, connectez-vous avec le même numéro et le même code secret pour tout retrouver.")
+                    .setPositiveButton("Sauvegarder maintenant", (d, w) -> syncNow())
+                    .setNeutralButton("Se déconnecter", (d, w) -> confirmSignOut())
+                    .setNegativeButton("Fermer", null)
+                    .show();
+            return;
+        }
+        LinearLayout form = column(10);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        form.addView(text("Un compte sauvegarde vos opérations, catégories, motifs et espèces. Si vous perdez ou changez de téléphone, connectez-vous pour tout retrouver.", 13, MUTED, false));
+        form.addView(text("Numéro de téléphone", 13, MUTED, false));
+        EditText phone = new EditText(this);
+        phone.setInputType(InputType.TYPE_CLASS_PHONE);
+        phone.setHint("6XXXXXXXX");
+        String guess = Store.pref(this, "ownerOmAuto", "");
+        if (!guess.isEmpty()) phone.setText(guess);
+        form.addView(phone, fill());
+        form.addView(text("Code secret (6 caractères minimum)", 13, MUTED, false));
+        EditText secret = new EditText(this);
+        secret.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        form.addView(secret, fill());
+        form.addView(text("N'utilisez jamais votre code Orange Money ou MoMo. Choisissez un code propre à cette application et notez-le : sans lui, la sauvegarde ne peut pas être récupérée.", 13, BAD, true));
+        new AlertDialog.Builder(this)
+                .setTitle("Compte et sauvegarde")
+                .setView(form)
+                .setPositiveButton("Créer mon compte", (d, w) -> doAuth(true, phone.getText().toString(), secret.getText().toString()))
+                .setNeutralButton("Me connecter", (d, w) -> doAuth(false, phone.getText().toString(), secret.getText().toString()))
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void doAuth(boolean create, String phoneText, String secret) {
+        String p9 = Cloud.phone9(phoneText);
+        if (p9 == null) { Toast.makeText(this, "Numéro invalide : saisissez un numéro camerounais à 9 chiffres (6XXXXXXXX).", Toast.LENGTH_LONG).show(); return; }
+        if (secret.length() < 6) { Toast.makeText(this, "Le code secret doit faire au moins 6 caractères.", Toast.LENGTH_LONG).show(); return; }
+        cloudLine.setText(create ? "☁  Création du compte…" : "☁  Connexion et récupération de vos données…");
+        io.execute(() -> {
+            String title, msg;
+            try {
+                if (create) Cloud.signUp(this, p9, secret); else Cloud.signIn(this, p9, secret);
+                String r = Cloud.sync(this);
+                SyncJob.schedule(this);
+                title = create ? "Compte créé" : "Connecté";
+                msg = (create ? "Vos données sont maintenant sauvegardées. " : "Vos données ont été récupérées et fusionnées avec celles de ce téléphone. ") + r;
+            } catch (Cloud.CloudException e) {
+                title = "Impossible pour l'instant";
+                msg = e.getMessage();
+            }
+            final String t = title, m = msg;
+            runOnUiThread(() -> {
+                reload(false);
+                new AlertDialog.Builder(this).setTitle(t).setMessage(m).setPositiveButton("OK", null).show();
+            });
+        });
+    }
+
+    private void confirmSignOut() {
+        new AlertDialog.Builder(this)
+                .setTitle("Se déconnecter ?")
+                .setMessage("Les données restent sur ce téléphone et dans votre compte en ligne. La sauvegarde automatique s'arrête. Attention : si vous vous connectez ensuite à un autre compte, les données de ce téléphone y seront ajoutées.")
+                .setPositiveButton("Se déconnecter", (d, w) -> io.execute(() -> {
+                    SyncJob.cancel(this);
+                    Cloud.signOut(this);
+                    runOnUiThread(this::render);
+                }))
                 .setNegativeButton("Annuler", null)
                 .show();
     }
@@ -993,11 +1238,12 @@ public class MainActivity extends Activity {
     // ---------- Plus, réglages ----------
 
     private void openMore() {
-        String[] items = {"Exporter en CSV", "Exporter les SMS anonymisés (pour améliorer la lecture)", "Réglages"};
+        String[] items = {"Compte et sauvegarde", "Exporter en CSV", "Exporter les SMS anonymisés (pour améliorer la lecture)", "Réglages"};
         new AlertDialog.Builder(this)
                 .setItems(items, (d, which) -> {
-                    if (which == 0) startExport(REQ_CSV);
-                    else if (which == 1) startExport(REQ_SMS);
+                    if (which == 0) openCompte();
+                    else if (which == 1) startExport(REQ_CSV);
+                    else if (which == 2) startExport(REQ_SMS);
                     else openSettings();
                 })
                 .show();
@@ -1051,20 +1297,32 @@ public class MainActivity extends Activity {
                     Store.saveConfig(this, om.getText().toString(), momo.getText().toString(), auto.isChecked(), owner.getText().toString().trim());
                     Store.saveFlag(this, "agent" + Caisse.OM, agentOm.isChecked());
                     Store.saveFlag(this, "agent" + Caisse.MOMO, agentMomo.isChecked());
+                    resetInbox();
                     reload(true);
                 })
-                .setNeutralButton("Effacer les SMS", (d, w) -> confirmClear())
+                .setNeutralButton("Relire / effacer…", (d, w) -> confirmClear())
                 .setNegativeButton("Annuler", null)
                 .show();
     }
 
     private void confirmClear() {
+        String[] items = {"Relire toute la messagerie (si des SMS anciens manquent)", "Effacer la copie des SMS et tout relire"};
+        new AlertDialog.Builder(this)
+                .setTitle("Lecture des SMS")
+                .setItems(items, (d, which) -> {
+                    if (which == 0) { resetInbox(); reload(true); }
+                    else confirmErase();
+                })
+                .show();
+    }
+
+    private void confirmErase() {
         new AlertDialog.Builder(this)
                 .setTitle("Effacer la copie des SMS ?")
                 .setMessage("La copie locale des SMS mobile money sera effacée, puis relue depuis votre messagerie. Les SMS déjà supprimés de la messagerie seront perdus. Vos catégories, motifs, espèces et clôtures sont conservés.")
                 .setPositiveButton("Effacer", (d, w) -> io.execute(() -> {
                     Store.get(this).clear();
-                    runOnUiThread(() -> reload(true));
+                    runOnUiThread(() -> { resetInbox(); reload(true); });
                 }))
                 .setNegativeButton("Annuler", null)
                 .show();

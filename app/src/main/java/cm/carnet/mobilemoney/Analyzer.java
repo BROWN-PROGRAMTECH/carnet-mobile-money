@@ -35,7 +35,27 @@ public final class Analyzer {
         public String ownerOm = "";
     }
 
+    /**
+     * Mémoire de lecture : empreinte du SMS -> résultat de lecture. Valable pour une version des règles
+     * et un numéro titulaire donnés ; sinon elle est vidée et tout est relu une fois.
+     */
+    public static final class Cache {
+        public String version = "";
+        public final Map<String, String> data = new java.util.HashMap<>();
+        /** Lectures ajoutées pendant l'analyse, à enregistrer. */
+        public final Map<String, String> added = new java.util.HashMap<>();
+        /** true si la mémoire a été vidée (à réécrire entièrement). */
+        public boolean reset;
+        public int hits, misses;
+
+        static String versionFor(String owner) { return SmsParser.RULES_VERSION + "|" + (owner == null ? "" : owner); }
+    }
+
     public static Result analyse(List<SmsParser.Sms> messages, SmsParser.Config cfg) {
+        return analyse(messages, cfg, null);
+    }
+
+    public static Result analyse(List<SmsParser.Sms> messages, SmsParser.Config cfg, Cache cache) {
         Result out = new Result();
         List<SmsParser.Sms> mm = new ArrayList<>();
         List<SmsParser.Sms> om = new ArrayList<>();
@@ -44,6 +64,7 @@ public final class Analyzer {
             if (op == null) continue;
             SmsParser.Sms s = new SmsParser.Sms(m.address, m.body, m.date, m.sub);
             s.op = op;
+            s.hash = m.hash;
             mm.add(s);
             if ("OM".equals(op)) om.add(s);
         }
@@ -54,13 +75,39 @@ public final class Analyzer {
         c.auto = cfg.auto;
         c.ownerOm = cfg.ownerOm != null && cfg.ownerOm.matches("6\\d{8}") ? cfg.ownerOm : SmsParser.detectOwner(om);
         out.ownerOm = c.ownerOm;
+        if (cache != null && !cache.version.equals(Cache.versionFor(c.ownerOm))) {
+            cache.data.clear();
+            cache.version = Cache.versionFor(c.ownerOm);
+            cache.reset = true;
+        }
 
         Set<String> seen = new HashSet<>();
         int i = 0;
         for (SmsParser.Sms s : mm) {
             i++;
             out.scanned++;
-            Txn t = SmsParser.parse(s, c);
+            Txn t = null;
+            String h = cache == null ? null : s.hash != null ? s.hash : SmsParser.hashOf(s.address, s.body);
+            if (h != null) {
+                String mem = cache.data.get(h);
+                if (mem != null && (t = Txn.fromCache(mem)) != null) {
+                    t.raw = s.body;
+                    t.sender = s.address;
+                    t.op = s.op;
+                    t.sub = s.sub == null ? "" : s.sub;
+                    t.smsDate = s.date;
+                    cache.hits++;
+                }
+            }
+            if (t == null) {
+                t = SmsParser.parse(s, c);
+                if (h != null) {
+                    String data = t.toCache();
+                    cache.data.put(h, data);
+                    cache.added.put(h, data);
+                    cache.misses++;
+                }
+            }
             t.order = i;
             if (t.kind == Txn.NOISE) { out.noise++; continue; }
             if (t.kind == Txn.FAILED) { out.failed++; continue; }

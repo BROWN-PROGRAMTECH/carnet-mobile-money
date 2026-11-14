@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,6 +29,8 @@ public final class SmsParser {
         public long date;
         public String sub = "";
         public String op;
+        /** Empreinte déjà connue (lue en base), pour éviter de la recalculer. */
+        public String hash;
 
         public Sms() {}
 
@@ -101,7 +105,39 @@ public final class SmsParser {
         return null;
     }
 
+    /** Version des règles de lecture : à augmenter à chaque changement de règle, pour relire les SMS déjà mémorisés. */
+    public static final int RULES_VERSION = 2;
+
+    /** Empreinte stable d'un SMS (expéditeur + texte), identique à celle de la base locale. */
+    public static String hashOf(String address, String body) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest((senderKey(address) + "|" + (body == null ? "" : body.trim())).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder b = new StringBuilder();
+            for (byte x : d) b.append(String.format("%02x", x));
+            return b.toString();
+        } catch (Exception e) {
+            return String.valueOf((address + "|" + body).hashCode());
+        }
+    }
+
+    // ---------- Règles compilées une seule fois ----------
+
+    private static final Map<String, Pattern> CACHE = new ConcurrentHashMap<>();
+
+    /** Expression régulière insensible à la casse, compilée au premier usage puis réutilisée. */
+    static Pattern ci(String regex) {
+        Pattern p = CACHE.get(regex);
+        if (p == null) {
+            p = Pattern.compile(regex, Pattern.CASE_INSENSITIVE);
+            CACHE.put(regex, p);
+        }
+        return p;
+    }
+
     // ---------- Montants (en centimes) ----------
+
+    private static final Pattern DECIMALS = Pattern.compile("^(.*?)[.,](\\d{1,2})$");
 
     /** "635.34" -> 63534 ; "10 000" -> 1000000 ; "50.000" -> 5000000 ; "4.2" -> 420. */
     public static Long money(String s) {
@@ -109,7 +145,7 @@ public final class SmsParser {
         String t = s.replaceAll("[\\s\\u00a0\\u202f]", "");
         if (t.isEmpty()) return null;
         long cents = 0;
-        Matcher dec = Pattern.compile("^(.*?)[.,](\\d{1,2})$").matcher(t);
+        Matcher dec = DECIMALS.matcher(t);
         if (dec.find() && !dec.group(1).isEmpty()) {
             String d = dec.group(2);
             cents = Long.parseLong(d.length() == 1 ? d + "0" : d);
@@ -130,23 +166,23 @@ public final class SmsParser {
 
     /** Montant qui suit une étiquette, ex. "Nouveau solde : 635.34 FCFA" ou "FRAIS: FCFA 0". */
     static Long labeled(String text, String label) {
-        Matcher m = Pattern.compile("(?:" + label + ")\\s*(?:est de|est|de|is|:|=|a)?\\s*:?\\s*(?:" + CUR + "\\s*)?" + NUM, Pattern.CASE_INSENSITIVE).matcher(text);
+        Matcher m = ci("(?:" + label + ")\\s*(?:est de|est|de|is|:|=|a)?\\s*:?\\s*(?:" + CUR + "\\s*)?" + NUM).matcher(text);
         return m.find() ? money(m.group(1)) : null;
     }
 
     /** Premier montant suivi d'une devise. */
     static Long firstAmount(String text) {
-        Matcher m = Pattern.compile(NUM + "\\s*(?:FCFA|F CFA|XAF)", Pattern.CASE_INSENSITIVE).matcher(text);
+        Matcher m = ci(NUM + "\\s*(?:FCFA|F CFA|XAF)").matcher(text);
         return m.find() ? money(m.group(1)) : null;
     }
 
     static String group(String text, String regex) {
-        Matcher m = Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(text);
+        Matcher m = ci(regex).matcher(text);
         return m.find() ? m.group(1).trim() : null;
     }
 
     static boolean has(String text, String regex) {
-        return Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(text).find();
+        return ci(regex).matcher(text).find();
     }
 
     // ---------- Champs communs ----------
@@ -163,10 +199,12 @@ public final class SmsParser {
         return c.getTimeInMillis();
     }
 
+    private static final Pattern PHONE = Pattern.compile("(?<!\\d)(?:\\+?237)?(6\\d{8})(?!\\d)");
+
     /** Numéros camerounais (9 chiffres commençant par 6) dans l'ordre d'apparition. */
     public static List<String> phones(String text) {
         List<String> out = new ArrayList<>();
-        Matcher m = Pattern.compile("(?<!\\d)(?:\\+?237)?(6\\d{8})(?!\\d)").matcher(text);
+        Matcher m = PHONE.matcher(text);
         while (m.find()) out.add(m.group(1));
         return out;
     }
