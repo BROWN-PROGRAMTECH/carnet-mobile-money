@@ -13,6 +13,6 @@ package cm.carnet.mobilemoney;
 public final class CloudConfig {
     private CloudConfig() {}
 
-    public static final String URL = "";
-    public static final String ANON_KEY = "";
+    public static final String URL = "https://saxnpugntqgiobpvrgry.supabase.co";
+    public static final String ANON_KEY = "sb_publishable_4jfvUCG4J_Z890eUfZ-rVw_6hP7I4On";
 }
