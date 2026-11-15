@@ -113,6 +113,8 @@ public final class Caisse {
         public final Map<Txn, Ligne> parSms = new IdentityHashMap<>();
         /** Mouvements d'espèces de la période, du plus récent au plus ancien. */
         public final List<Saisie> mouvementsEspeces = new ArrayList<>();
+        /** Journées de caisse espèces (fond et comptage), de la plus ancienne à la plus récente. */
+        public final List<Jour> jours = new ArrayList<>();
         /** Totaux par catégorie ; la clé null regroupe ce qui reste à classer. */
         public final Map<String, Total> totaux = new LinkedHashMap<>();
         public long frais;
@@ -209,6 +211,7 @@ public final class Caisse {
         Especes e = b.especes;
         List<Jour> tri = new ArrayList<>(jours);
         tri.sort((x, y) -> x.jour.compareTo(y.jour));
+        b.jours.addAll(tri);
         String jFrom = from <= 0 ? "" : jourDe(from), jTo = to == Long.MAX_VALUE ? "9999" : jourDe(to);
         long debut = from;
         for (Jour j : tri) {

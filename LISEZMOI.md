@@ -2,6 +2,17 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Version 0.7.0 : nouveau rapport Excel, plus simple à exploiter
+
+Le fichier Excel est réorganisé en **4 onglets** :
+
+- **Tableau de bord** (une page A4) : résultat de la période (ventes − paiements − frais), mouvements par catégorie et par compte (Orange Money, MoMo, Espèces), rapprochement des soldes avec l'écart en rouge ou en vert, et le nombre d'opérations à classer ou à vérifier.
+- **Opérations** : **un seul journal** pour Orange Money, MoMo et les espèces, au format « Tableau Excel » (filtres sur chaque colonne). Colonnes **Entrée** et **Sortie** séparées (les sommes et tableaux croisés marchent directement), colonne **Statut** (OK, À classer, À vérifier, Annulée) en couleur, « Auto / Manuel » dans sa propre colonne.
+- **Par jour** : l'état de caisse journée par journée (ventes, paiements, frais, résultat, soldes de fin de journée OM et MoMo, espèces théoriques, comptées et écart).
+- **Anomalies** : SMS non compris et ruptures de la chaîne des soldes, avec le texte du SMS.
+
+Les totaux sont des **formules** : si l'on corrige une catégorie dans Excel (liste déroulante de la colonne Catégorie), le tableau de bord et l'onglet Par jour se recalculent. Les valeurs sont aussi enregistrées dans le fichier, donc elles s'affichent même dans un lecteur qui ne recalcule pas. Impression en paysage, ajustée à la largeur, avec l'en-tête répété sur chaque page.
+
 ## Version 0.6.2 : correction de la fermeture au démarrage
 
 - L'application se fermait dès l'ouverture (affichage de l'état en haut de l'écran qui s'appelait lui-même en boucle). Corrigé.
