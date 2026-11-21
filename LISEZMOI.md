@@ -2,16 +2,23 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
-## Version 0.7.0 : nouveau rapport Excel, plus simple à exploiter
+## Version 0.7 : catégories selon le sens (entrée / sortie)
 
-Le fichier Excel est réorganisé en **4 onglets** :
+Chaque opération ne propose que les catégories qui vont avec son sens.
 
-- **Tableau de bord** (une page A4) : résultat de la période (ventes − paiements − frais), mouvements par catégorie et par compte (Orange Money, MoMo, Espèces), rapprochement des soldes avec l'écart en rouge ou en vert, et le nombre d'opérations à classer ou à vérifier.
-- **Opérations** : **un seul journal** pour Orange Money, MoMo et les espèces, au format « Tableau Excel » (filtres sur chaque colonne). Colonnes **Entrée** et **Sortie** séparées (les sommes et tableaux croisés marchent directement), colonne **Statut** (OK, À classer, À vérifier, Annulée) en couleur, « Auto / Manuel » dans sa propre colonne.
-- **Par jour** : l'état de caisse journée par journée (ventes, paiements, frais, résultat, soldes de fin de journée OM et MoMo, espèces théoriques, comptées et écart).
-- **Anomalies** : SMS non compris et ruptures de la chaîne des soldes, avec le texte du SMS.
+| Entrées uniquement | Sorties uniquement | Entrées et sorties |
+|---|---|---|
+| Vente | Achat / fournisseur | Don |
+| Apport personnel | Charge (loyer, salaire, transport…) | Transfert entre mes comptes |
+| Prêt reçu | Retrait personnel | Autre |
+| | Remboursement de prêt | Opération client (agent, automatique) |
 
-Les totaux sont des **formules** : si l'on corrige une catégorie dans Excel (liste déroulante de la colonne Catégorie), le tableau de bord et l'onglet Par jour se recalculent. Les valeurs sont aussi enregistrées dans le fichier, donc elles s'affichent même dans un lecteur qui ne recalcule pas. Impression en paysage, ajustée à la largeur, avec l'en-tête répété sur chaque page.
+- **Résultat = Ventes − Achats − Charges − Frais.** Apports, retraits personnels, prêts, dons et transferts n'en font pas partie.
+- **Conversion automatique** des anciennes catégories : Paiement → Achat / fournisseur ; Personnel → Apport (entrée) ou Retrait personnel (sortie) ; une Vente sur une sortie (ou un Paiement sur une entrée) revient « À classer ». Rien n'est effacé.
+- **Toujours classer un contact** : la règle est maintenant séparée pour les entrées et les sorties. Un même numéro peut être client quand il vous paie et fournisseur quand vous le payez. Les anciennes règles continuent de s'appliquer, converties selon le sens.
+- Page À classer : 3 boutons rapides selon le sens (entrée : Vente, Apport perso, Transfert ; sortie : Achat, Charge, Retrait perso) + « Autres ▸ ».
+- Fenêtre de classement et saisie d'espèces : la liste change avec le sens, et une phrase explique si la catégorie compte dans le résultat.
+- Excel, feuille Synthèse : colonnes « Type » (entrée / sortie / les deux) et « Dans le résultat » (+, −, non).
 
 ## Version 0.6.2 : correction de la fermeture au démarrage
 

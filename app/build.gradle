@@ -11,7 +11,7 @@ android {
         minSdk 26
         targetSdk 34
         versionCode 10
-        versionName '0.7.0'
+        versionName '0.7'
     }
 
     // Clé de test fixe : permet d'installer les nouvelles versions par-dessus l'ancienne.

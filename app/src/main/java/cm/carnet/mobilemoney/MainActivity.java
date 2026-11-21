@@ -57,7 +57,9 @@ public class MainActivity extends Activity {
     private static final int CUSTOM = 4;
     private static final int PAGE_CAISSE = 0, PAGE_CLASSER = 1, PAGE_EXPORT = 2, PAGE_COMPTE = 3;
     private static final int LISTE_JOURNAL = 0, LISTE_ESPECES = 1, LISTE_CHECK = 2;
-    private static final String[] COURT = {"Vente", "Paiement", "Don", "Perso", "Autre"};
+    /** Boutons rapides de la page À classer, selon le sens ; les autres catégories sont dans « Autres ▸ ». */
+    private static final String[] RAPIDES_ENTREE = {Caisse.VENTE, Caisse.APPORT, Caisse.TRANSFERT};
+    private static final String[] RAPIDES_SORTIE = {Caisse.ACHAT, Caisse.CHARGE, Caisse.RETRAIT_PERSO};
 
     private static final int BG = Color.parseColor("#F3F5F2"), SURFACE = Color.WHITE, INK = Color.parseColor("#17201D"),
             MUTED = Color.parseColor("#5B6662"), LINE = Color.parseColor("#D8DED9"), ACCENT = Color.parseColor("#0E6A5B"),
@@ -498,10 +500,11 @@ public class MainActivity extends Activity {
         if (c == null) return BAD;
         switch (c) {
             case Caisse.VENTE: return GOOD;
-            case Caisse.PAIEMENT: return INK;
+            case Caisse.ACHAT: case Caisse.CHARGE: return INK;
+            case Caisse.APPORT: case Caisse.RETRAIT_PERSO: return WARN;
+            case Caisse.PRET_RECU: case Caisse.REMB_PRET: return OM;
             case Caisse.DON: return PURPLE;
-            case Caisse.PERSONNEL: return WARN;
-            case Caisse.AGENT: return CASH;
+            case Caisse.TRANSFERT: case Caisse.AGENT: return CASH;
             default: return MUTED;
         }
     }
@@ -510,6 +513,34 @@ public class MainActivity extends Activity {
         int fg = catColor(c);
         TextView t = chip(Caisse.categorieNom(c) + (auto ? " · auto" : ""), fg, c == null ? BAD_BG : BG);
         return t;
+    }
+
+    /** Grille de catégories pour un sens (2 par ligne) ; met à jour choix[0] et le texte d'aide. */
+    private void categorieGrid(LinearLayout grille, TextView aide, int sens, String[] choix) {
+        grille.removeAllViews();
+        String[] cats = Caisse.pour(sens);
+        Button[] bs = new Button[cats.length];
+        LinearLayout ligne = null;
+        for (int i = 0; i < cats.length; i++) {
+            if (i % 2 == 0) {
+                ligne = new LinearLayout(this);
+                grille.addView(ligne, fill());
+            }
+            final String c = cats[i];
+            bs[i] = button(Caisse.categorieNom(c), false, null);
+            bs[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            ligne.addView(bs[i], weight(i % 2 == 1));
+            if (i == cats.length - 1 && i % 2 == 0) ligne.addView(new View(this), weight(true));
+        }
+        Runnable paint = () -> {
+            for (int i = 0; i < bs.length; i++) select(bs[i], cats[i].equals(choix[0]));
+            aide.setText(Caisse.aide(choix[0]));
+        };
+        for (int i = 0; i < bs.length; i++) {
+            final String c = cats[i];
+            bs[i].setOnClickListener(v -> { choix[0] = c; paint.run(); });
+        }
+        paint.run();
     }
 
     private TextView empty(String s) {
@@ -859,12 +890,14 @@ public class MainActivity extends Activity {
         TextView res = text((b.resultat >= 0 ? "" : "−") + SmsParser.fmt(Math.abs(b.resultat)) + " FCFA", 30, Color.WHITE, true);
         res.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         card.addView(res);
-        card.addView(text("ventes − paiements − frais opérateur", 12, ON_ACCENT_SOFT, false));
+        card.addView(text("ventes − achats − charges − frais opérateur", 12, ON_ACCENT_SOFT, false));
 
-        Caisse.Total v = b.total(Caisse.VENTE), p = b.total(Caisse.PAIEMENT), d = b.total(Caisse.DON), pe = b.total(Caisse.PERSONNEL);
+        long ventes = b.total(Caisse.VENTE).entrees;
+        long depenses = b.total(Caisse.ACHAT).sorties + b.total(Caisse.CHARGE).sorties;
+        long apports = b.total(Caisse.APPORT).entrees, retraits = b.total(Caisse.RETRAIT_PERSO).sorties;
         LinearLayout stats = new LinearLayout(this);
         stats.setPadding(0, dp(8), 0, dp(2));
-        String[][] cols = {{"Ventes", "+" + SmsParser.fmt(v.entrees - v.sorties)}, {"Paiements", "−" + SmsParser.fmt(p.sorties - p.entrees)}, {"Frais", "−" + SmsParser.fmt(b.frais)}};
+        String[][] cols = {{"Ventes", "+" + SmsParser.fmt(ventes)}, {"Achats + charges", "−" + SmsParser.fmt(depenses)}, {"Frais", "−" + SmsParser.fmt(b.frais)}};
         for (int i = 0; i < cols.length; i++) {
             LinearLayout c = column(1);
             c.addView(text(cols[i][0], 12, ON_ACCENT_SOFT, false));
@@ -874,9 +907,9 @@ public class MainActivity extends Activity {
             stats.addView(c, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         }
         card.addView(stats, fill());
-        if (d.count > 0 || pe.count > 0) {
-            card.addView(text("Dons +" + SmsParser.fmt(d.entrees) + " / −" + SmsParser.fmt(d.sorties)
-                    + "   ·   Personnel +" + SmsParser.fmt(pe.entrees) + " / −" + SmsParser.fmt(pe.sorties), 12, ON_ACCENT_SOFT, false));
+        if (apports > 0 || retraits > 0) {
+            card.addView(text("Hors résultat : apports perso +" + SmsParser.fmt(apports) + " · retraits perso −" + SmsParser.fmt(retraits),
+                    12, ON_ACCENT_SOFT, false));
         }
         TextView state;
         if (!b.aClasser.isEmpty()) {
@@ -1358,10 +1391,10 @@ public class MainActivity extends Activity {
 
         if (quick) {
             LinearLayout q = new LinearLayout(this);
-            for (int i = 0; i < Caisse.CATEGORIES.length; i++) {
-                final String c = Caisse.CATEGORIES[i];
-                q.addView(small(COURT[i], catColor(c), v -> classer(t, c, l.motif, false)), weight(i == Caisse.CATEGORIES.length - 1));
+            for (String c : t.sens > 0 ? RAPIDES_ENTREE : RAPIDES_SORTIE) {
+                q.addView(small(Caisse.court(c), catColor(c), v -> classer(t, c, l.motif, false)), weight(false));
             }
+            q.addView(small("Autres ▸", MUTED, v -> openClassement(l)), weight(true));
             row.addView(q, fill());
         }
         row.setOnClickListener(v -> openClassement(l));
@@ -1387,7 +1420,7 @@ public class MainActivity extends Activity {
         LinearLayout act = new LinearLayout(this);
         act.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout chipBox = new LinearLayout(this);
-        chipBox.addView(s.annule ? chip("Annulée", MUTED, BG) : catChip(s.categorie, false));
+        chipBox.addView(s.annule ? chip("Annulée", MUTED, BG) : catChip(Caisse.normaliserSaisie(s.categorie, s.sens), false));
         act.addView(chipBox, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         if (!s.annule) act.addView(small("Annuler", BAD, v -> confirmAnnuler(s)));
         row.addView(act, fill());
@@ -1413,10 +1446,11 @@ public class MainActivity extends Activity {
     private void classer(Txn t, String categorie, String motif, boolean toujours) {
         final String key = Caisse.cle(t);
         final String numero = t.numero;
+        final int sens = t.sens;
         io.execute(() -> {
             Store store = Store.get(this);
             store.classer(key, categorie, motif);
-            if (toujours && numero != null) store.regle(numero, categorie);
+            if (toujours && numero != null) store.regle(Caisse.cleRegle(numero, sens), categorie);
             SyncJob.soon(this);
             Map<String, Caisse.Classement> cl = store.classements();
             Map<String, String> rg = store.regles();
@@ -1441,22 +1475,12 @@ public class MainActivity extends Activity {
                 + "\nMontant lu dans le SMS : non modifiable.", 13, MUTED, false));
 
         final String[] choix = {l.categorie != null && !Caisse.AGENT.equals(l.categorie) ? l.categorie : null};
-        form.addView(text("Catégorie", 13, MUTED, false));
-        LinearLayout r1 = new LinearLayout(this), r2 = new LinearLayout(this);
-        Button[] cb = new Button[Caisse.CATEGORIES.length];
-        for (int i = 0; i < cb.length; i++) {
-            cb[i] = button(COURT[i], false, null);
-            cb[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-            (i < 3 ? r1 : r2).addView(cb[i], weight(i == 2 || i == cb.length - 1));
-        }
-        Runnable paint = () -> { for (int i = 0; i < cb.length; i++) select(cb[i], Caisse.CATEGORIES[i].equals(choix[0])); };
-        for (int i = 0; i < cb.length; i++) {
-            final String c = Caisse.CATEGORIES[i];
-            cb[i].setOnClickListener(v -> { choix[0] = c; paint.run(); });
-        }
-        paint.run();
-        form.addView(r1, fill());
-        form.addView(r2, fill());
+        form.addView(text(t.sens > 0 ? "Catégorie d'entrée" : "Catégorie de sortie", 13, MUTED, false));
+        LinearLayout grille = column(6);
+        TextView aide = text("", 12, MUTED, false);
+        categorieGrid(grille, aide, t.sens, choix);
+        form.addView(grille, fill());
+        form.addView(aide);
 
         form.addView(text("Motif", 13, MUTED, false));
         EditText motif = new EditText(this);
@@ -1468,8 +1492,8 @@ public class MainActivity extends Activity {
         CheckBox toujours = new CheckBox(this);
         if (t.numero != null) {
             String who = t.nom != null ? t.nom : t.numero;
-            toujours.setText("Toujours classer " + who + " dans cette catégorie");
-            toujours.setChecked(regles.containsKey(t.numero));
+            toujours.setText("Toujours classer les " + (t.sens > 0 ? "entrées venant de " : "sorties vers ") + who + " dans cette catégorie");
+            toujours.setChecked(regles.containsKey(Caisse.cleRegle(t.numero, t.sens)) || regles.containsKey(t.numero));
             form.addView(toujours, fill());
         }
 
@@ -1480,9 +1504,16 @@ public class MainActivity extends Activity {
                 .setView(sv)
                 .setPositiveButton("Enregistrer", (d, w) -> {
                     boolean always = t.numero != null && toujours.isChecked();
-                    if (!always && t.numero != null && regles.containsKey(t.numero)) {
+                    final String cleSens = t.numero != null ? Caisse.cleRegle(t.numero, t.sens) : null;
+                    if (!always && t.numero != null && (regles.containsKey(cleSens) || regles.containsKey(t.numero))) {
                         final String numero = t.numero;
-                        io.execute(() -> { Store.get(this).regle(numero, null); SyncJob.soon(this); });
+                        final boolean ancienne = regles.containsKey(numero);
+                        io.execute(() -> {
+                            Store st = Store.get(this);
+                            st.regle(cleSens, null);
+                            if (ancienne) st.regle(numero, null);
+                            SyncJob.soon(this);
+                        });
                     }
                     classer(t, choix[0], motif.getText().toString().trim(), always && choix[0] != null);
                 })
@@ -1497,6 +1528,8 @@ public class MainActivity extends Activity {
         form.setPadding(dp(20), dp(8), dp(20), 0);
         final int[] sens = {1};
         final String[] cat = {Caisse.VENTE};
+        LinearLayout grille = column(6);
+        TextView aide = text("", 12, MUTED, false);
 
         LinearLayout sensRow = new LinearLayout(this);
         Button in = button("Entrée", false, null), out = button("Sortie", false, null);
@@ -1508,28 +1541,20 @@ public class MainActivity extends Activity {
         EditText montant = amountField("ex. 15000");
         form.addView(montant, fill());
 
-        form.addView(text("Catégorie", 13, MUTED, false));
-        LinearLayout r1 = new LinearLayout(this), r2 = new LinearLayout(this);
-        Button[] cb = new Button[Caisse.CATEGORIES.length];
-        for (int i = 0; i < cb.length; i++) {
-            cb[i] = button(COURT[i], false, null);
-            cb[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-            (i < 3 ? r1 : r2).addView(cb[i], weight(i == 2 || i == cb.length - 1));
-        }
+        TextView catTitre = text("", 13, MUTED, false);
+        form.addView(catTitre);
+        form.addView(grille, fill());
+        form.addView(aide);
         Runnable paint = () -> {
             select(in, sens[0] > 0);
             select(out, sens[0] < 0);
-            for (int i = 0; i < cb.length; i++) select(cb[i], Caisse.CATEGORIES[i].equals(cat[0]));
+            catTitre.setText(sens[0] > 0 ? "Catégorie d'entrée" : "Catégorie de sortie");
+            categorieGrid(grille, aide, sens[0], cat);
         };
-        in.setOnClickListener(v -> { sens[0] = 1; if (Caisse.PAIEMENT.equals(cat[0])) cat[0] = Caisse.VENTE; paint.run(); });
-        out.setOnClickListener(v -> { sens[0] = -1; if (Caisse.VENTE.equals(cat[0])) cat[0] = Caisse.PAIEMENT; paint.run(); });
-        for (int i = 0; i < cb.length; i++) {
-            final String c = Caisse.CATEGORIES[i];
-            cb[i].setOnClickListener(v -> { cat[0] = c; paint.run(); });
-        }
+        // En changeant de sens, une catégorie qui ne va pas avec le nouveau sens est remplacée par la plus courante.
+        in.setOnClickListener(v -> { sens[0] = 1; if (!Caisse.compatible(cat[0], 1)) cat[0] = Caisse.VENTE; paint.run(); });
+        out.setOnClickListener(v -> { sens[0] = -1; if (!Caisse.compatible(cat[0], -1)) cat[0] = Caisse.ACHAT; paint.run(); });
         paint.run();
-        form.addView(r1, fill());
-        form.addView(r2, fill());
 
         EditText libelle = new EditText(this);
         libelle.setInputType(InputType.TYPE_CLASS_TEXT);
