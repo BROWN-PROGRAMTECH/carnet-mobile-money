@@ -27,7 +27,7 @@ public final class Store extends SQLiteOpenHelper {
     }
 
     private Store(Context ctx) {
-        super(ctx, "carnet.db", null, 5);
+        super(ctx, "carnet.db", null, 8);
     }
 
     @Override
@@ -37,6 +37,9 @@ public final class Store extends SQLiteOpenHelper {
         createClassement(db);
         upgradeTo4(db);
         createLecture(db);
+        upgradeTo6(db);
+        createFinances(db);
+        createCategoriesPerso(db);
     }
 
     @Override
@@ -46,7 +49,120 @@ public final class Store extends SQLiteOpenHelper {
         if (oldV < 3) createClassement(db);
         if (oldV < 4) upgradeTo4(db);
         if (oldV < 5) createLecture(db);
+        if (oldV < 6) upgradeTo6(db);
+        if (oldV < 7) createFinances(db);
+        if (oldV < 8) createCategoriesPerso(db);
     }
+
+    /** Version 8 : catégories créées par l'utilisateur et catégories fournies masquées (communes au compte). */
+    private static void createCategoriesPerso(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS categorie_perso (code TEXT PRIMARY KEY, nom TEXT, sens INTEGER, masquee INTEGER, maj INTEGER)");
+    }
+
+    public List<Caisse.Perso> categoriesPerso() {
+        List<Caisse.Perso> out = new ArrayList<>();
+        Cursor c = getReadableDatabase().query("categorie_perso", new String[] {"code", "nom", "sens", "masquee", "maj"}, null, null, null, null, "maj");
+        try {
+            while (c.moveToNext()) {
+                Caisse.Perso p = new Caisse.Perso();
+                p.code = c.getString(0);
+                p.nom = c.isNull(1) ? null : c.getString(1);
+                p.sens = c.isNull(2) ? 0 : c.getInt(2);
+                p.masquee = !c.isNull(3) && c.getInt(3) != 0;
+                p.maj = c.isNull(4) ? 0 : c.getLong(4);
+                out.add(p);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    public void setCategoriePerso(Caisse.Perso p) {
+        ContentValues v = new ContentValues();
+        v.put("code", p.code);
+        if (p.nom == null) v.putNull("nom"); else v.put("nom", p.nom);
+        v.put("sens", p.sens);
+        v.put("masquee", p.masquee ? 1 : 0);
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("categorie_perso", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    /**
+     * Version 7 (finances) : budget mensuel par poste de dépense et autres avoirs (banque sans SMS, épargne, tontine…).
+     * Montants en centimes ; un montant NULL vaut suppression (gardée pour la synchronisation).
+     */
+    private static void createFinances(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS budget (poste TEXT PRIMARY KEY, montant INTEGER, maj INTEGER)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS avoir (id TEXT PRIMARY KEY, nom TEXT, montant INTEGER, maj INTEGER)");
+    }
+
+    /** Budgets mensuels par poste (centimes). */
+    public Map<String, Long> budgets() {
+        Map<String, Long> out = new HashMap<>();
+        Cursor c = getReadableDatabase().query("budget", new String[] {"poste", "montant"}, "montant IS NOT NULL AND montant > 0", null, null, null, null);
+        try {
+            while (c.moveToNext()) out.put(c.getString(0), c.getLong(1));
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    /** Fixe (ou retire, montant null ou 0) le budget mensuel d'un poste. */
+    public void setBudget(String poste, Long montant) {
+        ContentValues v = new ContentValues();
+        v.put("poste", poste);
+        if (montant == null || montant <= 0) v.putNull("montant"); else v.put("montant", montant);
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("budget", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    public static final class Avoir {
+        public String id, nom;
+        public long montant, maj;
+    }
+
+    /** Autres avoirs saisis à la main (hors OM, MoMo, banques lues par SMS et espèces). */
+    public List<Avoir> avoirs() {
+        List<Avoir> out = new ArrayList<>();
+        Cursor c = getReadableDatabase().query("avoir", new String[] {"id", "nom", "montant", "maj"}, "montant IS NOT NULL", null, null, null, "nom");
+        try {
+            while (c.moveToNext()) {
+                Avoir a = new Avoir();
+                a.id = c.getString(0);
+                a.nom = c.isNull(1) ? "" : c.getString(1);
+                a.montant = c.getLong(2);
+                a.maj = c.isNull(3) ? 0 : c.getLong(3);
+                out.add(a);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    /** Ajoute ou modifie un avoir ; montant null = suppression. */
+    public void setAvoir(String id, String nom, Long montant) {
+        ContentValues v = new ContentValues();
+        v.put("id", id);
+        v.put("nom", nom);
+        if (montant == null) v.putNull("montant"); else v.put("montant", montant);
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("avoir", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    /**
+     * Version 6 (caisses) : origine de chaque SMS. « ici » = lu dans la messagerie de ce téléphone (ou de sa caisse),
+     * « autre » = reçu d'un autre téléphone du même compte avant la version 0.8, mis de côté (jamais effacé).
+     * NULL = pas encore vérifié : compté normalement tant que la vérification n'a pas eu lieu.
+     */
+    private static void upgradeTo6(SQLiteDatabase db) {
+        db.execSQL("ALTER TABLE sms ADD COLUMN origine TEXT");
+    }
+
+    /** Filtre SQL des SMS de ce téléphone. */
+    private static final String ICI = "(origine IS NULL OR origine <> 'autre')";
 
     /** Version 5 : mémoire de lecture, pour ne plus relire à chaque ouverture les SMS déjà compris. */
     private static void createLecture(SQLiteDatabase db) {
@@ -94,12 +210,89 @@ public final class Store extends SQLiteOpenHelper {
         v.put("date", s.date);
         v.put("sub", s.sub);
         v.put("maj", System.currentTimeMillis());
-        return getWritableDatabase().insertWithOnConflict("sms", null, v, SQLiteDatabase.CONFLICT_IGNORE) != -1;
+        v.put("origine", "ici");
+        SQLiteDatabase db = getWritableDatabase();
+        if (db.insertWithOnConflict("sms", null, v, SQLiteDatabase.CONFLICT_IGNORE) != -1) return true;
+        // Déjà présent : s'il avait été mis de côté, il est bien dans la messagerie de ce téléphone.
+        ContentValues o = new ContentValues();
+        o.put("origine", "ici");
+        o.put("maj", System.currentTimeMillis());
+        return db.update("sms", o, "hash = ? AND origine = 'autre'", new String[] {hash(s.address, s.body)}) > 0;
+    }
+
+    /**
+     * Vérification unique (version 0.8) : les SMS présents dans la messagerie de ce téléphone sont à lui ;
+     * les autres SMS pas encore vérifiés venaient d'un autre téléphone du compte et sont mis de côté.
+     * Renvoie le nombre de SMS mis de côté.
+     */
+    public int marquerOrigine(java.util.Set<String> boite) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            List<String> inconnus = new ArrayList<>();
+            Cursor c = db.query("sms", new String[] {"hash"}, "origine IS NULL", null, null, null, null);
+            try {
+                while (c.moveToNext()) inconnus.add(c.getString(0));
+            } finally {
+                c.close();
+            }
+            int autres = 0;
+            for (String h : inconnus) {
+                ContentValues v = new ContentValues();
+                boolean ici = boite.contains(h);
+                v.put("origine", ici ? "ici" : "autre");
+                if (!ici) autres++;
+                db.update("sms", v, "hash = ?", new String[] {h});
+            }
+            db.setTransactionSuccessful();
+            return autres;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    /** Un seul téléphone sur le compte : tous les SMS pas encore vérifiés sont à lui. */
+    public void toutIci() {
+        ContentValues v = new ContentValues();
+        v.put("origine", "ici");
+        getWritableDatabase().update("sms", v, "origine IS NULL", null);
+    }
+
+    /** SMS mis de côté (venus d'un autre téléphone). */
+    public int misDeCote() {
+        Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM sms WHERE origine = 'autre'", null);
+        try {
+            return c.moveToFirst() ? c.getInt(0) : 0;
+        } finally {
+            c.close();
+        }
+    }
+
+    /** Remet dans cette caisse les SMS mis de côté (s'ils étaient en fait de ce téléphone). */
+    public void recupererMisDeCote() {
+        ContentValues v = new ContentValues();
+        v.put("origine", "ici");
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().update("sms", v, "origine = 'autre'", null);
+    }
+
+    /** Signature des données (nombre et dernière modification) : sert à savoir si les résumés sont à recalculer. */
+    public String signature() {
+        StringBuilder b = new StringBuilder();
+        for (String t : new String[] {"sms", "classement", "regle", "saisie", "jour", "budget", "avoir", "categorie_perso"}) {
+            Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*), MAX(maj) FROM " + t, null);
+            try {
+                if (c.moveToFirst()) b.append(c.getLong(0)).append(':').append(c.isNull(1) ? 0 : c.getLong(1)).append('|');
+            } finally {
+                c.close();
+            }
+        }
+        return b.toString();
     }
 
     public List<SmsParser.Sms> all() {
         List<SmsParser.Sms> out = new ArrayList<>();
-        Cursor c = getReadableDatabase().query("sms", new String[] {"address", "body", "date", "sub", "hash"}, null, null, null, null, "date ASC");
+        Cursor c = getReadableDatabase().query("sms", new String[] {"address", "body", "date", "sub", "hash"}, ICI, null, null, null, "date ASC");
         try {
             while (c.moveToNext()) {
                 SmsParser.Sms s = new SmsParser.Sms(c.getString(0), c.getString(1), c.getLong(2), c.getString(3));
@@ -113,7 +306,7 @@ public final class Store extends SQLiteOpenHelper {
     }
 
     public int count() {
-        Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM sms", null);
+        Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*) FROM sms WHERE " + ICI, null);
         try {
             return c.moveToFirst() ? c.getInt(0) : 0;
         } finally {
@@ -343,6 +536,9 @@ public final class Store extends SQLiteOpenHelper {
             new Spec("regle", "numero", false, "numero", "categorie", "maj:n"),
             new Spec("saisie", "uid", false, "uid", "date:n", "mode", "sens:n", "montant:n", "libelle", "ref", "annule:n", "depuis_sms:n", "cree:n", "categorie", "maj:n"),
             new Spec("jour", "jour", false, "jour", "fond:n", "compte:n", "note", "cloture_at:n", "maj:n"),
+            new Spec("budget", "poste", false, "poste", "montant:n", "maj:n"),
+            new Spec("avoir", "id", false, "id", "nom", "montant:n", "maj:n"),
+            new Spec("categorie_perso", "code", false, "code", "nom", "sens:n", "masquee:n", "maj:n"),
     };
 
     /** Lignes modifiées après "since", par ordre de modification. Valeurs : String, Long ou null. */
@@ -354,7 +550,10 @@ public final class Store extends SQLiteOpenHelper {
     public List<Object[]> changedSince(Spec s, long since, String sinceKey, int limit) {
         List<Object[]> out = new ArrayList<>();
         String t = String.valueOf(since);
-        Cursor c = getReadableDatabase().query(s.table, s.cols, "maj > ? OR (maj = ? AND " + s.key + " > ?)",
+        String where = "(maj > ? OR (maj = ? AND " + s.key + " > ?))";
+        // Les SMS mis de côté (venus d'un autre téléphone) ne sont jamais renvoyés dans la caisse de ce téléphone.
+        if ("sms".equals(s.table)) where += " AND origine = 'ici'";
+        Cursor c = getReadableDatabase().query(s.table, s.cols, where,
                 new String[] {t, t, sinceKey == null ? "" : sinceKey}, null, null, "maj ASC, " + s.key + " ASC", String.valueOf(limit));
         try {
             while (c.moveToNext()) {
@@ -383,8 +582,14 @@ public final class Store extends SQLiteOpenHelper {
         }
         if (key == null) return;
         SQLiteDatabase db = getWritableDatabase();
+        // Depuis la version 0.8, le téléphone ne reçoit que les SMS de sa propre caisse.
+        if ("sms".equals(s.table)) v.put("origine", "ici");
         if (s.immutable) {
-            db.insertWithOnConflict(s.table, null, v, SQLiteDatabase.CONFLICT_IGNORE);
+            if (db.insertWithOnConflict(s.table, null, v, SQLiteDatabase.CONFLICT_IGNORE) == -1 && "sms".equals(s.table)) {
+                ContentValues o = new ContentValues();
+                o.put("origine", "ici");
+                db.update("sms", o, "hash = ? AND origine = 'autre'", new String[] {key});
+            }
             return;
         }
         Cursor c = db.query(s.table, new String[] {"maj"}, s.key + " = ?", new String[] {key}, null, null, null);
@@ -404,7 +609,8 @@ public final class Store extends SQLiteOpenHelper {
 
     public static SmsParser.Config config(Context ctx) {
         SharedPreferences p = ctx.getSharedPreferences("reglages", Context.MODE_PRIVATE);
-        SmsParser.Config c = SmsParser.Config.of(p.getString("om", SmsParser.DEFAULT_OM), p.getString("momo", SmsParser.DEFAULT_MOMO), p.getBoolean("auto", false));
+        SmsParser.Config c = SmsParser.Config.of(p.getString("om", SmsParser.DEFAULT_OM), p.getString("momo", SmsParser.DEFAULT_MOMO),
+                p.getString("banques", SmsParser.DEFAULT_BANQUES), p.getBoolean("auto", false));
         String manual = p.getString("ownerOm", "").replaceAll("\\D", "");
         if (manual.length() > 9) manual = manual.substring(manual.length() - 9);
         c.ownerOm = manual.matches("6\\d{8}") ? manual : p.getString("ownerOmAuto", "");

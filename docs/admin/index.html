@@ -185,6 +185,7 @@ async function load(all){
     const t = { stats: rpc("admin_stats") };
     if (all || ["apercu","recharges"].includes(tab)) t.recharges = rpc("admin_recharges", { p_statut: null });
     if (all || ["apercu","comptes"].includes(tab)) t.comptes = rpc("admin_comptes");
+    if (all || tab==="comptes") t.caisses = rpc("admin_caisses").catch(()=>[]);
     if (all || tab==="exports") t.exports = rpc("admin_exports", { p_jours: 30 });
     if (all || tab==="appareils") t.appareils = rpc("admin_appareils");
     if (all || tab==="incidents") t.incidents = rpc("admin_incidents", { p_jours: 30 });
@@ -259,13 +260,15 @@ function comptes(){
   const rows = (cache.comptes||[]).filter(c=>!q || String(c.telephone||"").includes(q));
   return `<div class="bar"><input id="qCompte" placeholder="Rechercher un numéro" value="${esc(rechercheCompte)}" inputmode="tel"></div>
     <div class="tablewrap"><table><thead><tr><th>Numéro</th><th class="num">Solde</th><th class="num">Exports</th><th class="num">Dépensé</th><th>Dernier export</th><th>Dernière sauvegarde</th><th>Note</th><th></th></tr></thead><tbody>
-    ${rows.map(c=>`<tr><td>${tel(c.telephone)}${c.suspendu?" "+tag("suspendu"):""}<div class="muted" style="font-size:12px">depuis ${d(c.cree)} · ${c.appareils} tél.</div></td>
+    ${rows.map(c=>`<tr><td>${tel(c.telephone)}${c.suspendu?" "+tag("suspendu"):""}<div class="muted" style="font-size:12px">depuis ${d(c.cree)} · ${c.appareils} tél. · ${nbCaisses(c.user_id)} caisse(s)</div></td>
       <td class="num ${c.solde<0?"bad":""}"><b>${fcfa(c.solde)}</b>${c.recharges_en_attente?`<div>${tag("en_attente")}</div>`:""}</td>
       <td class="num">${c.exports}${c.offerts_utilises?`<div class="muted" style="font-size:12px">dont ${c.offerts_utilises} offert</div>`:""}</td>
       <td class="num">${fcfa(c.depense)}</td><td>${d(c.dernier_export)}</td><td>${ago(c.dernier_sync)}</td><td>${esc(c.note||"")}</td>
       <td><div class="actions"><button class="b" data-crediter="${c.user_id}">Créditer</button><button class="b" data-modifier="${c.user_id}">Modifier</button></div></td></tr>`).join("") || `<tr><td colspan="8" class="empty">Aucun compte.</td></tr>`}
     </tbody></table></div>`;
 }
+
+function nbCaisses(uid){ const r=(cache.caisses||[]).find(x=>x.user_id===uid); return r ? r.caisses : (demo ? 1 : 0); }
 
 function exports(){
   const rows = cache.exports||[];

@@ -2,6 +2,60 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Version 0.9.1 : vos catégories, choix par recherche, recharge simplifiée
+
+**Catégories personnalisées** (communes à tous les téléphones du compte) :
+- Créez vos catégories : **Recette (+)** pour les entrées (ex. Commission, Prestation), **Charge (−)** pour les sorties (rangée sous Charges, avec budget possible, ex. Publicité), ou **Hors résultat** (ex. Cotisation, Avance) pour les entrées, les sorties ou les deux.
+- **Masquez** les catégories fournies que vous n'utilisez jamais (sauf Autre et Opération client) : elles disparaissent des choix, l'historique reste intact.
+- Gestion dans **Compte → Catégories** : créer, renommer, masquer ou réafficher.
+
+**Choix de la catégorie** : un champ « Rechercher ou créer une catégorie… », vos 3 catégories les plus utilisées en haut, puis la liste par sections (Entrées / Sorties / Charges / Mes catégories / Entrée ou sortie). Si le mot n'existe pas : « + Créer la catégorie » directement. Les boutons rapides de la page À classer reprennent vos 3 catégories les plus utilisées.
+
+**Recharge du porte-monnaie en 2 étapes** :
+1. **Payer** : l'écran montre seulement le numéro, le nom affiché par l'opérateur et le bouton « J'ai envoyé l'argent ».
+2. **Déclarer** : l'application retrouve elle-même le SMS de confirmation du transfert vers le numéro de recharge (montant et ID) et propose « Déclarer cette recharge » en un toucher. Saisie manuelle de l'ID possible en secours (paiement fait depuis un autre téléphone).
+
+Numéros de recharge enregistrés : Orange Money 657 268 549, MTN MoMo 653 877 731, au nom de BROWN ALDEN DJOMO.
+
+> Serveur déjà à jour (`supabase/categories.sql` appliqué).
+
+## Version 0.9 : gestion des finances et SMS des banques
+
+**Nouvel onglet Finances** (barre du bas : Caisse · À classer · Finances · Exporter · Compte), mois par mois (◂ ▸) :
+- **Trésorerie d'aujourd'hui** : dernier solde de chaque compte (OM, MoMo, banques lues par SMS), espèces du jour et **autres avoirs** saisis à la main (banque sans SMS, épargne, tontine…), avec l'évolution des soldes sur 30 jours.
+- **Le mois** : ventes, achats, charges, frais et résultat, avec la variation par rapport à la même période du mois précédent ; apports et retraits personnels ; ce que l'activité garde après vos retraits.
+- **Dépenses par poste et budgets** : budget mensuel par poste, barres de progression, alertes à 80 % et 100 %.
+- **Ventes par moyen de paiement** et **meilleurs clients** du mois.
+
+**Postes de charges** : la catégorie « Charge » se détaille en Loyer, Salaires, Transport, Électricité / eau, Téléphone / internet, Impôts et taxes, Autre charge. Les charges déjà classées deviennent « Autre charge ». Le choix de catégorie est présenté par sections (Sorties, Charges, Entrée ou sortie).
+
+**SMS des banques** : Afriland First Bank, UBA, CCA Bank, Ecobank, SG Cameroun, SCB, BICEC, CBC, BGFIBank, Banque Atlantique, Access Bank, UBC, NFC Bank, Citibank (liste modifiable dans Compte → Réglages avancés).
+- Avis de solde (format Afriland vérifié sur de vrais SMS), débits et crédits avec montant et solde (français et anglais).
+- La publicité des banques est ignorée ; un SMS bancaire dont le sens n'est pas clair va dans « À vérifier ».
+- Chaque banque apparaît comme un compte, avec contrôle des soldes comme OM et MoMo.
+- À la première ouverture de la 0.9, la messagerie est relue une fois pour retrouver les anciens SMS des banques.
+
+**Export Excel** : nouvelle feuille « Finances » (trésorerie, dépenses par poste face au budget, ventes par moyen, meilleurs clients). L'export « Toutes les caisses » ajoute la trésorerie de chaque caisse.
+
+> Serveur déjà à jour (`supabase/finances.sql` appliqué). Pour un autre projet : SQL Editor → collez `supabase/finances.sql` → Run.
+>
+> Formats bancaires : seuls les avis de solde Afriland ont été vérifiés sur de vrais SMS. Si un SMS de votre banque n'est pas bien lu, il apparaît dans « À vérifier » : envoyez-en un exemple (montants et numéros masqués) pour ajouter une règle précise.
+
+## Version 0.8 : un compte, plusieurs téléphones, une caisse par téléphone
+
+- **Un seul compte** (un numéro, un code secret, un porte-monnaie) pour tous les téléphones d'un commerçant.
+- **Chaque téléphone a sa caisse** : ses SMS, ses soldes OM et MoMo, ses espèces et ses classements ne se mélangent plus avec ceux des autres téléphones. Les règles « toujours classer ce contact » restent communes.
+- **Premier téléphone** : sa caisse « Caisse principale » est créée automatiquement (renommable dans Compte).
+- **Autre téléphone** : après connexion, onglet Compte → « Créer la caisse de ce téléphone » (cas habituel) ou « Reprendre » la caisse d'un ancien téléphone (remplacement, perte).
+- **Code patron** (4 à 6 chiffres, onglet Compte) : protège la vue « Toutes mes caisses » et la reprise d'une caisse. 5 erreurs = blocage 15 minutes. Il n'est jamais enregistré en clair.
+- **Toutes mes caisses** (onglet Caisse, dès 2 caisses) : résultat total, puis une carte par caisse (résultat, ventes, achats + charges, frais, opérations, derniers soldes, dernière sauvegarde). Chaque téléphone envoie un résumé par jour, sans SMS ni nom de contact.
+- **Export « Toutes les caisses »** (onglet Exporter) : une ligne par caisse + le détail par jour, même tarif que l'export d'une caisse.
+- **Comptes déjà utilisés sur plusieurs téléphones** : à la mise à jour, chaque téléphone garde les SMS présents dans sa messagerie ; ceux reçus de l'autre téléphone sont mis de côté (jamais effacés, récupérables dans Compte).
+
+> Le serveur est déjà à jour (`supabase/caisses.sql` appliqué sur votre projet). Pour un autre projet : SQL Editor → collez `supabase/caisses.sql` → Run.
+>
+> Le code patron est une protection de l'application : quelqu'un qui connaît le numéro et le code secret du compte reste propriétaire des données. Ne donnez pas le code secret du compte à un employé : saisissez-le vous-même sur son téléphone.
+
 ## Version 0.7 : catégories selon le sens (entrée / sortie)
 
 Chaque opération ne propose que les catégories qui vont avec son sens.

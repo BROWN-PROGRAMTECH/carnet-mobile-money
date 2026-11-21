@@ -21,6 +21,41 @@ public final class SmsParser {
 
     public static final String DEFAULT_OM = "OrangeMoney, Orange Money";
     public static final String DEFAULT_MOMO = "MobileMoney, MTN MoMo";
+    /** Expéditeurs SMS des banques (modifiable dans les réglages). */
+    public static final String DEFAULT_BANQUES = "FirstBank, Afriland, UBACameroon, UBA, CCA Bank, CCA-BANK, Ecobank, SGC, SG Cameroun, "
+            + "SCB Cameroun, SCB, BICEC, CBC, BGFIBank, BGFI, Atlantique, Banque Atlantique, Access Bank, UnionBank, UBC, NFC Bank, Citibank";
+
+    /** Nom affiché de chaque banque, à partir de ses différents noms d'expéditeur. */
+    private static final String[][] BANQUES = {
+            {"Afriland First Bank", "FirstBank", "Afriland", "AfrilandFB"},
+            {"UBA", "UBACameroon", "UBA"},
+            {"CCA Bank", "CCA Bank", "CCA-BANK", "CCABank"},
+            {"Ecobank", "Ecobank"},
+            {"SG Cameroun", "SGC", "SG Cameroun", "SGCameroun"},
+            {"SCB Cameroun", "SCB Cameroun", "SCB", "SCBCameroun"},
+            {"BICEC", "BICEC"},
+            {"CBC", "CBC"},
+            {"BGFIBank", "BGFIBank", "BGFI"},
+            {"Banque Atlantique", "Atlantique", "Banque Atlantique", "BanqueAtlantique"},
+            {"Access Bank", "Access Bank", "AccessBank"},
+            {"UBC", "UnionBank", "UBC"},
+            {"NFC Bank", "NFC Bank", "NFCBank"},
+            {"Citibank", "Citibank"},
+    };
+
+    /** Nom de la banque pour un expéditeur configuré (nom connu, sinon l'expéditeur tel quel). */
+    public static String nomBanque(String expediteur) {
+        String k = senderKey(expediteur);
+        for (String[] b : BANQUES) for (int i = 1; i < b.length; i++) if (k.equals(senderKey(b[i]))) return b[0];
+        return expediteur.trim();
+    }
+
+    /** Préfixe des comptes bancaires dans les opérations (ex. « BQ:UBA »). */
+    public static final String BANQUE = "BQ:";
+
+    public static boolean estBanque(String op) {
+        return op != null && op.startsWith(BANQUE);
+    }
 
     /** Un SMS brut tel que lu dans la boîte de réception. */
     public static final class Sms {
@@ -46,16 +81,30 @@ public final class SmsParser {
     public static final class Config {
         public final List<String> om = new ArrayList<>();
         public final List<String> momo = new ArrayList<>();
+        public final List<String> banques = new ArrayList<>();
         public boolean auto = false;
         /** Numéro Orange Money du titulaire (9 chiffres), saisi ou détecté. Sert au sens des transferts. */
         public String ownerOm = "";
 
         public static Config of(String om, String momo, boolean auto) {
+            return of(om, momo, DEFAULT_BANQUES, auto);
+        }
+
+        public static Config of(String om, String momo, String banques, boolean auto) {
             Config c = new Config();
             c.om.addAll(split(om));
             c.momo.addAll(split(momo));
+            c.banques.addAll(split(banques));
             c.auto = auto;
             return c;
+        }
+
+        /** Tous les expéditeurs suivis (OM, MoMo, banques). */
+        public List<String> expediteurs() {
+            List<String> all = new ArrayList<>(om);
+            all.addAll(momo);
+            all.addAll(banques);
+            return all;
         }
 
         static List<String> split(String v) {
@@ -96,6 +145,7 @@ public final class SmsParser {
         if (!k.isEmpty()) {
             for (String s : cfg.om) if (k.equals(senderKey(s))) return "OM";
             for (String s : cfg.momo) if (k.equals(senderKey(s))) return "MOMO";
+            for (String s : cfg.banques) if (k.equals(senderKey(s))) return BANQUE + nomBanque(s);
         }
         if (!cfg.auto) return null;
         String low = norm(body).toLowerCase(Locale.ROOT);
@@ -106,7 +156,7 @@ public final class SmsParser {
     }
 
     /** Version des règles de lecture : à augmenter à chaque changement de règle, pour relire les SMS déjà mémorisés. */
-    public static final int RULES_VERSION = 2;
+    public static final int RULES_VERSION = 3;
 
     /** Empreinte stable d'un SMS (expéditeur + texte), identique à celle de la base locale. */
     public static String hashOf(String address, String body) {
@@ -234,6 +284,7 @@ public final class SmsParser {
             t.reason = "Opération échouée : aucun mouvement";
             return t;
         }
+        if (estBanque(sms.op)) return parseBanque(text, t);
         boolean ok = "OM".equals(sms.op) ? parseOm(text, t, cfg) : parseMomo(text, t);
         if (!ok) {
             Long amt = firstAmount(text);
@@ -247,6 +298,89 @@ public final class SmsParser {
             t.reason = "Montant introuvable";
         }
         return t;
+    }
+
+    // ---------- Banques ----------
+
+    /** Montant collé à une devise (« XAF 25 000 » ou « 25 000 FCFA ») : évite de prendre un numéro de compte. */
+    private static final String MONTANT_DEVISE = "(?:(?:XAF|FCFA|F CFA|CFA)\\s*" + NUM + "|" + NUM + "\\s*(?:XAF|FCFA|F CFA|CFA))";
+
+    /** Premier montant avec devise dans un morceau de texte ; [montant, position de début, position de fin]. */
+    private static long[] montantDevise(String text, int from, int to) {
+        Matcher m = ci(MONTANT_DEVISE).matcher(text);
+        m.region(Math.max(0, from), Math.min(text.length(), to));
+        if (!m.find()) return null;
+        String g = m.group(1) != null ? m.group(1) : m.group(2);
+        Long v = money(g);
+        return v == null ? null : new long[] {v, m.start(), m.end()};
+    }
+
+    private static final String MOTS_DEBIT = "debit|debite|retrait|prelevement|paiement|achat|virement emis|transfert emis|vous avez envoye"
+            + "|vous avez paye|debited|withdrawal|purchase|payment|sent";
+    private static final String MOTS_CREDIT = "credit|credite|versement|depot|virement recu|transfert recu|vous avez recu|credited|deposit|received";
+
+    /**
+     * SMS bancaire. Formats reconnus :
+     *  - avis de solde (ex. Afriland : « le solde de votre compte 1051-17 est de XAF 0 au 03-07-2026 11:28 ») ;
+     *  - mouvement : montant avec devise + mot de débit ou de crédit (+ nouveau solde s'il est donné).
+     * Un SMS avec un montant mais sans sens clair va dans « À vérifier » ; un SMS sans montant (publicité) est ignoré.
+     */
+    static Txn parseBanque(String text, Txn t) {
+        String low = deaccent(text).toLowerCase(Locale.ROOT);
+        if (has(low, "echec|echoue|failed|rejete|refuse|declined|insuffisant|insufficient")) {
+            t.kind = Txn.FAILED;
+            t.reason = "Opération bancaire refusée : aucun mouvement";
+            return t;
+        }
+        // Solde : premier montant avec devise après « solde » / « balance ».
+        Long solde = null;
+        int debutSolde = -1;
+        Matcher sm = ci("\\b(?:nouveau solde|solde disponible|solde comptable|solde|new balance|available balance|balance)\\b").matcher(low);
+        if (sm.find()) {
+            long[] s = montantDevise(text, sm.end(), sm.end() + 80);
+            if (s != null) {
+                solde = s[0];
+                debutSolde = (int) s[1];
+            }
+        }
+        // Montant de l'opération : premier montant avec devise qui n'est pas le solde.
+        Long montant = null;
+        Matcher mm = ci(MONTANT_DEVISE).matcher(text);
+        while (mm.find()) {
+            if (mm.start() == debutSolde) continue;
+            montant = money(mm.group(1) != null ? mm.group(1) : mm.group(2));
+            if (montant != null) break;
+        }
+        int posDebit = indexOf(low, MOTS_DEBIT), posCredit = indexOf(low, MOTS_CREDIT);
+        int sens = posDebit < 0 && posCredit < 0 ? 0 : posCredit < 0 ? -1 : posDebit < 0 ? 1 : (posDebit < posCredit ? -1 : 1);
+
+        if (montant != null && sens != 0) {
+            t.kind = Txn.TX;
+            t.type = sens > 0 ? "BANQUE_CREDIT" : "BANQUE_DEBIT";
+            t.sens = sens;
+            t.montant = montant;
+            t.solde = solde;
+            t.motif = group(text, "(?:motif|libelle|ref(?:erence)?|reason)\\s*:?\\s*([^.;\\n]{2,60})");
+            return t;
+        }
+        if (solde != null && montant == null) {
+            t.kind = Txn.TX;
+            t.type = "SOLDE";
+            t.solde = solde;
+            return t;
+        }
+        if (montant == null && solde == null) {
+            t.kind = Txn.NOISE;
+            return t;
+        }
+        t.kind = Txn.UNKNOWN;
+        t.reason = "SMS bancaire non reconnu (sens de l'opération introuvable)";
+        return t;
+    }
+
+    private static int indexOf(String low, String mots) {
+        Matcher m = ci("\\b(?:" + mots + ")\\b").matcher(low);
+        return m.find() ? m.start() : -1;
     }
 
     // ---------- Orange Money ----------

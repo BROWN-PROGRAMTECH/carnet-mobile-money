@@ -14,6 +14,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -26,7 +27,7 @@ import java.util.UUID;
 public final class Cloud {
     private Cloud() {}
 
-    public static final String VERSION_APP = "0.7";
+    public static final String VERSION_APP = "0.9.1";
     private static final String DOMAIN = "@carnet-mm.app";
     private static final int PAGE = 1000, BATCH = 500;
 
@@ -165,13 +166,34 @@ public final class Cloud {
         Store st = Store.get(c);
         int pulled = 0, pushed = 0;
         try {
+            // 0. Caisse de ce téléphone : créée automatiquement pour le premier téléphone du compte ;
+            //    sinon l'utilisateur choisit (onglet Compte) et rien n'est envoyé d'ici là.
+            String caisse = caisseId(c);
+            if (caisse.isEmpty()) {
+                Caisses cs = rafraichirCaisses(c, tok);
+                if (cs.liste.isEmpty()) {
+                    JSONObject r = creerCaisseRpc(c, tok, "Caisse principale");
+                    assigner(c, r.getString("id"), r.optString("nom", "Caisse principale"));
+                    caisse = caisseId(c);
+                } else {
+                    prefs(c).edit().putBoolean("caisse_a_choisir", true).apply();
+                    return "choisissez d'abord la caisse de ce téléphone (onglet Compte)";
+                }
+            }
+            migrerOrigine(c, tok, st);
+            // Classements à envoyer : seulement ceux des opérations de ce téléphone (un compte utilisé sur plusieurs
+            // téléphones avant la version 0.8 a pu recevoir ceux des autres).
+            java.util.Set<String> mesCles = null;
+
             for (Store.Spec s : Store.SYNC) {
                 String select = String.join(",", s.cols);
+                boolean parCaisse = PAR_CAISSE.contains(s.table);
+                String filtre = parCaisse ? "&caisse=eq." + caisse : "";
 
-                // 1. Recevoir ce qui a été modifié ailleurs (autre téléphone, restauration).
+                // 1. Recevoir ce qui a été modifié ailleurs (restauration, reprise de caisse) : seulement cette caisse.
                 long since = prefs(c).getLong("pull_" + s.table, 0), newest = since;
                 for (int offset = 0; ; offset += PAGE) {
-                    String q = "/rest/v1/" + s.table + "?select=" + select + "&maj=gt." + since + "&order=maj.asc&limit=" + PAGE + "&offset=" + offset;
+                    String q = "/rest/v1/" + s.table + "?select=" + select + filtre + "&maj=gt." + since + "&order=maj.asc&limit=" + PAGE + "&offset=" + offset;
                     JSONArray arr = new JSONArray(http("GET", q, null, tok, null));
                     for (int i = 0; i < arr.length(); i++) {
                         JSONObject o = arr.getJSONObject(i);
@@ -180,6 +202,12 @@ public final class Cloud {
                             String col = s.cols[k];
                             if (!o.has(col) || o.isNull(col)) row[k] = null;
                             else row[k] = s.numeric[k] ? (Object) o.getLong(col) : o.getString(col);
+                        }
+                        // Journées, budgets, avoirs : clé « caisse|… » sur le serveur, « … » sur le téléphone.
+                        if (CLE_PAR_CAISSE.contains(s.table) && row[0] instanceof String) {
+                            String j = (String) row[0];
+                            int bar = j.lastIndexOf('|');
+                            row[0] = bar >= 0 ? j.substring(bar + 1) : j;
                         }
                         st.merge(s, row);
                         Object m = row[s.cols.length - 1];
@@ -201,16 +229,26 @@ public final class Cloud {
                 while (true) {
                     List<Object[]> rows = st.changedSince(s, sent, sentKey, BATCH);
                     if (rows.isEmpty()) break;
+                    if ("classement".equals(s.table) && mesCles == null) {
+                        mesCles = new java.util.HashSet<>();
+                        Analyzer.Result r = Analyzer.analyse(st.all(), Store.config(c), st.lecture(c));
+                        for (Txn t : r.tx) mesCles.add(Caisse.cle(t));
+                    }
                     JSONArray arr = new JSONArray();
                     for (Object[] row : rows) {
+                        if ("classement".equals(s.table) && !mesCles.contains(String.valueOf(row[0]))) continue;
                         JSONObject o = new JSONObject();
                         o.put("user_id", userId);
                         for (int k = 0; k < s.cols.length; k++) o.put(s.cols[k], row[k] == null ? JSONObject.NULL : row[k]);
+                        if (parCaisse) o.put("caisse", caisse);
+                        if (CLE_PAR_CAISSE.contains(s.table)) o.put(s.key, caisse + "|" + row[0]);
                         arr.put(o);
                     }
-                    http("POST", "/rest/v1/" + s.table + "?on_conflict=user_id," + s.key, arr.toString(), tok,
-                            "resolution=merge-duplicates,return=minimal");
-                    pushed += rows.size();
+                    if (arr.length() > 0) {
+                        http("POST", "/rest/v1/" + s.table + "?on_conflict=user_id," + s.key, arr.toString(), tok,
+                                "resolution=merge-duplicates,return=minimal");
+                    }
+                    pushed += arr.length();
                     Object[] last = rows.get(rows.size() - 1);
                     Object m = last[s.cols.length - 1];
                     sent = m instanceof Long ? (Long) m : sent;
@@ -220,6 +258,8 @@ public final class Cloud {
                 }
             }
             registerDevice(c, tok, userId);
+            try { envoyerResumes(c, tok, userId, caisse, st); } catch (Exception e) { saveErrorResume(c, e); }
+            try { rafraichirCaisses(c, tok); } catch (Exception ignored) {}
             envoyerPlantages(c, tok, userId);
             try { envoyerExportsEnAttente(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
             envoyerIncidents(c, tok, userId);
@@ -236,7 +276,266 @@ public final class Cloud {
         return pulled + " élément(s) reçu(s), " + pushed + " envoyé(s).";
     }
 
-// ---------- Porte-monnaie et exports payants ----------
+// ---------- Caisses (un compte, plusieurs téléphones) ----------
+
+    /** Tables dont les lignes appartiennent à une caisse ; les règles par contact restent communes au compte. */
+    private static final java.util.Set<String> PAR_CAISSE = new java.util.HashSet<>(java.util.Arrays.asList("sms", "classement", "saisie", "jour", "budget", "avoir"));
+    /** Tables dont la clé locale (« AAAA-MM-JJ », poste, identifiant) devient « caisse|clé » sur le serveur. */
+    private static final java.util.Set<String> CLE_PAR_CAISSE = new java.util.HashSet<>(java.util.Arrays.asList("jour", "budget", "avoir"));
+
+    public static String caisseId(Context ctx) { return prefs(ctx.getApplicationContext()).getString("caisse_id", ""); }
+
+    public static String caisseNom(Context ctx) { return prefs(ctx.getApplicationContext()).getString("caisse_nom", ""); }
+
+    /** Vrai si le compte a déjà des caisses et que ce téléphone doit en choisir une (créer ou reprendre). */
+    public static boolean caisseAChoisir(Context ctx) {
+        Context c = ctx.getApplicationContext();
+        return loggedIn(c) && caisseId(c).isEmpty() && prefs(c).getBoolean("caisse_a_choisir", false);
+    }
+
+    public static final class Caisse1 {
+        public String id, nom, modele;
+        public long activite;
+    }
+
+    public static final class Caisses {
+        public boolean codeDefini;
+        public final List<Caisse1> liste = new ArrayList<>();
+    }
+
+    /** Caisses du compte telles que connues à la dernière connexion. */
+    public static Caisses caisses(Context ctx) {
+        return lireCaisses(prefs(ctx.getApplicationContext()).getString("caisses_json", ""));
+    }
+
+    static Caisses lireCaisses(String raw) {
+        Caisses cs = new Caisses();
+        if (raw == null || raw.isEmpty()) return cs;
+        try {
+            JSONObject o = new JSONObject(raw);
+            cs.codeDefini = o.optBoolean("code_defini", false);
+            JSONArray a = o.optJSONArray("caisses");
+            if (a != null) for (int i = 0; i < a.length(); i++) {
+                JSONObject x = a.getJSONObject(i);
+                Caisse1 k = new Caisse1();
+                k.id = str(x, "id");
+                k.nom = str(x, "nom");
+                k.modele = str(x, "modele");
+                k.activite = x.optLong("activite", 0);
+                cs.liste.add(k);
+            }
+        } catch (Exception ignored) {}
+        return cs;
+    }
+
+    private static Caisses rafraichirCaisses(Context c, String tok) throws Exception {
+        String r = http("POST", "/rest/v1/rpc/mes_caisses", "{}", tok, null).trim();
+        if (r.startsWith("{")) {
+            prefs(c).edit().putString("caisses_json", r).apply();
+            // Le nom de la caisse de ce téléphone suit les changements faits ailleurs.
+            for (Caisse1 k : lireCaisses(r).liste) if (k.id.equals(caisseId(c))) prefs(c).edit().putString("caisse_nom", k.nom).apply();
+        }
+        return lireCaisses(r);
+    }
+
+    /** Liste à jour des caisses du compte (écran Compte). */
+    public static Caisses rafraichirCaisses(Context ctx) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            return rafraichirCaisses(c, token(c));
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    private static JSONObject creerCaisseRpc(Context c, String tok, String nom) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("p_nom", nom);
+        body.put("p_device", deviceId(c));
+        body.put("p_modele", Build.MANUFACTURER + " " + Build.MODEL);
+        return new JSONObject(http("POST", "/rest/v1/rpc/creer_caisse", body.toString(), tok, null));
+    }
+
+    /**
+     * Ce téléphone travaille désormais sur cette caisse : toutes ses données y seront renvoyées, et celles
+     * de la caisse (si elle existait déjà) seront reçues à la prochaine sauvegarde.
+     */
+    private static void assigner(Context c, String id, String nom) {
+        SharedPreferences.Editor e = prefs(c).edit();
+        e.putString("caisse_id", id).putString("caisse_nom", nom).putBoolean("caisse_a_choisir", false).putBoolean("origine_a_verifier", true);
+        for (String t : PAR_CAISSE) e.remove("pull_" + t).remove("push_" + t).remove("pushk_" + t);
+        e.remove("resume_envoyes");
+        e.apply();
+    }
+
+    /** Crée une nouvelle caisse pour ce téléphone puis sauvegarde. */
+    public static String creerCaisse(Context ctx, String nom) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject r = creerCaisseRpc(c, token(c), nom);
+            assigner(c, r.getString("id"), r.optString("nom", nom));
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+        return sync(c);
+    }
+
+    /** Reprend la caisse d'un autre téléphone (remplacement, perte) ; demande le code patron s'il existe. */
+    public static String reprendreCaisse(Context ctx, String id, String code) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("p_caisse", id);
+            body.put("p_code", code == null ? "" : code);
+            body.put("p_device", deviceId(c));
+            body.put("p_modele", Build.MANUFACTURER + " " + Build.MODEL);
+            JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/reprendre_caisse", body.toString(), token(c), null));
+            if (!r.optBoolean("ok", false)) throw new CloudException(str(r, "erreur"));
+            assigner(c, id, str(r, "nom"));
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+        return sync(c);
+    }
+
+    public static void renommerCaisse(Context ctx, String nom) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("p_caisse", caisseId(c));
+            body.put("p_nom", nom);
+            String tok = token(c);
+            http("POST", "/rest/v1/rpc/renommer_caisse", body.toString(), tok, null);
+            prefs(c).edit().putString("caisse_nom", nom.trim()).apply();
+            try { rafraichirCaisses(c, tok); } catch (Exception ignored) {}
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    /** Définit ou change le code patron ; renvoie null si c'est fait, sinon le message d'erreur. */
+    public static String definirCodePatron(Context ctx, String ancien, String nouveau) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("p_ancien", ancien == null ? "" : ancien);
+            body.put("p_nouveau", nouveau);
+            String tok = token(c);
+            JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/definir_code_patron", body.toString(), tok, null));
+            try { rafraichirCaisses(c, tok); } catch (Exception ignored) {}
+            return r.optBoolean("ok", false) ? null : str(r, "erreur");
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    /** Vue « Toutes mes caisses » sur une période (jours AAAA-MM-JJ inclus). Erreur de code : CloudException. */
+    public static JSONObject vueCaisses(Context ctx, String code, String debut, String fin) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("p_code", code == null ? "" : code);
+            body.put("p_debut", debut);
+            body.put("p_fin", fin);
+            JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/vue_caisses", body.toString(), token(c), null));
+            if (!r.optBoolean("ok", false)) throw new CloudException(str(r, "erreur"));
+            return r;
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    /**
+     * Une seule fois après le choix de la caisse : si d'autres téléphones ont utilisé ce compte, seuls les SMS
+     * présents dans la messagerie de ce téléphone restent dans sa caisse ; les autres sont mis de côté (pas effacés).
+     */
+    private static void migrerOrigine(Context c, String tok, Store st) throws Exception {
+        if (!prefs(c).getBoolean("origine_a_verifier", false)) return;
+        JSONArray a = new JSONArray(http("GET", "/rest/v1/appareil?select=device_id", null, tok, null));
+        String moi = deviceId(c);
+        boolean autres = false;
+        for (int i = 0; i < a.length(); i++) if (!moi.equals(a.getJSONObject(i).optString("device_id", ""))) autres = true;
+        java.util.Set<String> boite = autres ? Boite.empreintes(c) : null;
+        if (boite == null) st.toutIci();
+        else prefs(c).edit().putInt("mis_de_cote", st.marquerOrigine(boite)).apply();
+        prefs(c).edit().putBoolean("origine_a_verifier", false).apply();
+    }
+
+    /** Envoie les résumés journaliers qui ont changé depuis le dernier envoi. */
+    private static void envoyerResumes(Context c, String tok, String userId, String caisse, Store st) throws Exception {
+        String sig = st.signature() + Store.prefBool(c, "agent" + Caisse.OM, false) + Store.prefBool(c, "agent" + Caisse.MOMO, false);
+        if (sig.equals(prefs(c).getString("resume_sig", ""))) return;
+        SmsParser.Config cfg = Store.config(c);
+        Caisse.definirPerso(st.categoriesPerso());
+        Analyzer.Cache cache = st.lecture(c);
+        Analyzer.Result r = Analyzer.analyse(st.all(), cfg, cache);
+        List<Resumes.Jour> tous = Resumes.calculer(r, st.classements(), st.regles(), st.saisies(), st.jours(),
+                Store.prefBool(c, "agent" + Caisse.OM, false), Store.prefBool(c, "agent" + Caisse.MOMO, false));
+        java.util.Map<String, String> envoyes = new java.util.HashMap<>();
+        try {
+            JSONObject o = new JSONObject(prefs(c).getString("resume_envoyes", "{}"));
+            JSONArray names = o.names();
+            if (names != null) for (int i = 0; i < names.length(); i++) envoyes.put(names.getString(i), o.getString(names.getString(i)));
+        } catch (Exception ignored) {}
+        List<Resumes.Jour> diff = Resumes.aEnvoyer(tous, envoyes);
+        long now = System.currentTimeMillis();
+        for (int from = 0; from < diff.size(); from += BATCH) {
+            JSONArray arr = new JSONArray();
+            for (Resumes.Jour j : diff.subList(from, Math.min(diff.size(), from + BATCH))) {
+                JSONObject o = new JSONObject();
+                o.put("user_id", userId);
+                o.put("caisse", caisse);
+                o.put("jour", j.jour);
+                o.put("nb_operations", j.nbOperations);
+                o.put("a_classer", j.aClasser);
+                o.put("ventes", j.ventes);
+                o.put("achats", j.achats);
+                o.put("charges", j.charges);
+                o.put("frais", j.frais);
+                o.put("resultat", j.resultat);
+                o.put("apports", j.apports);
+                o.put("retraits", j.retraits);
+                o.put("solde_om", j.soldeOm == null ? JSONObject.NULL : j.soldeOm);
+                o.put("solde_momo", j.soldeMomo == null ? JSONObject.NULL : j.soldeMomo);
+                o.put("especes_compte", j.especesCompte == null ? JSONObject.NULL : j.especesCompte);
+                o.put("ecart_om", j.ecartOm == null ? JSONObject.NULL : j.ecartOm);
+                o.put("ecart_momo", j.ecartMomo == null ? JSONObject.NULL : j.ecartMomo);
+                o.put("ecart_especes", j.ecartEspeces == null ? JSONObject.NULL : j.ecartEspeces);
+                o.put("tresorerie", j.tresorerie == null ? JSONObject.NULL : j.tresorerie);
+                o.put("maj", now);
+                arr.put(o);
+            }
+            http("POST", "/rest/v1/resume?on_conflict=user_id,caisse,jour", arr.toString(), tok, "resolution=merge-duplicates,return=minimal");
+            for (Resumes.Jour j : diff.subList(from, Math.min(diff.size(), from + BATCH))) envoyes.put(j.jour, j.signature());
+            prefs(c).edit().putString("resume_envoyes", new JSONObject(envoyes).toString()).apply();
+        }
+        prefs(c).edit().putString("resume_sig", sig).apply();
+    }
+
+    private static void saveErrorResume(Context c, Exception e) {
+        prefs(c).edit().putString("incident_attente", "Résumés non envoyés : " + e.getMessage()).apply();
+    }
+
+    /** SMS mis de côté lors de la séparation des caisses (venus d'un autre téléphone du compte). */
+    public static void recupererMisDeCote(Context ctx) {
+        Context c = ctx.getApplicationContext();
+        Store.get(c).recupererMisDeCote();
+        prefs(c).edit().putInt("mis_de_cote", 0).remove("resume_sig").apply();
+    }
+
+    // ---------- Porte-monnaie et exports payants ----------
 
     private static String deviceId(Context c) {
         String device = prefs(c).getString("device_id", "");
