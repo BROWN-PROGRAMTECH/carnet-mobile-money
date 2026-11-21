@@ -76,11 +76,14 @@ public final class Txn {
             case "PAIEMENT": return "Paiement";
             case "CREDIT_TEL": return "Achat de crédit";
             case "SOLDE": return "Consultation de solde";
+            case "BANQUE_CREDIT": return "Crédit bancaire";
+            case "BANQUE_DEBIT": return "Débit bancaire";
             default: return "Opération";
         }
     }
 
     public static String opName(String op) {
+        if (op != null && op.startsWith(SmsParser.BANQUE)) return op.substring(SmsParser.BANQUE.length());
         return "OM".equals(op) ? "Orange Money" : "MTN MoMo";
     }
 }

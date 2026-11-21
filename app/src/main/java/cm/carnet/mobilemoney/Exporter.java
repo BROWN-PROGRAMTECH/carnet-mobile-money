@@ -36,6 +36,12 @@ public final class Exporter {
 
     /** Classeur de caisse : Synthèse, Journal de caisse, À classer, Espèces, À vérifier. */
     public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now) throws IOException {
+        return xlsx(r, bilan, from, to, periodLabel, now, null, null);
+    }
+
+    /** Classeur complet ; tresorerie et budgets (facultatifs) ajoutent la feuille « Finances ». */
+    public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now,
+                              Finances.Tresorerie tresorerie, Map<String, Long> budgets) throws IOException {
         XlsxWriter w = new XlsxWriter();
 
         XlsxWriter.Sheet s = w.sheet("Synthèse", 28, 16, 16, 12, 16, 16, 14, 14, 14).noHeader();
@@ -103,6 +109,83 @@ public final class Exporter {
         v.row("Date", "Compte", "Raison", "SMS");
         for (Txn u : r.unknown)
             if (u.smsDate >= from && u.smsDate <= to) v.row(new Date(u.smsDate), Txn.opName(u.op), u.reason, u.raw);
+        if (tresorerie != null || budgets != null) {
+            XlsxWriter.Sheet f = w.sheet("Finances", 32, 18, 18, 14).noHeader();
+            if (tresorerie != null) {
+                f.row("**Trésorerie au moment de l'export", new Date(now));
+                f.row("**Poste", "**Montant (FCFA)", "**Information du");
+                for (Finances.Poste p : tresorerie.postes) {
+                    f.row(p.nom + (p.manuel ? " (saisi)" : ""), fcfa(p.montant), p.date > 0 ? new Date(p.date) : null);
+                }
+                f.row("**Total", fcfa(tresorerie.total));
+                f.row();
+            }
+            Finances.Mois m = Finances.mois(bilan);
+            f.row("**Dépenses par poste · " + periodLabel);
+            f.row("**Poste", "**Dépensé (FCFA)", "**Budget mensuel (FCFA)", "**% du budget");
+            Map<String, Long> bud = budgets != null ? budgets : new java.util.HashMap<>();
+            for (Finances.Budget b : Finances.budgets(m, bud)) {
+                f.row(Caisse.categorieNom(b.poste), fcfa(b.depense), b.budget > 0 ? fcfa(b.budget) : null, b.budget > 0 ? (Object) (long) b.pourcent : null);
+            }
+            f.row();
+            f.row("**Ventes par moyen de paiement");
+            for (Map.Entry<String, Long> vm : m.ventesParMoyen.entrySet()) f.row(vm.getKey(), fcfa(vm.getValue()));
+            if (!m.meilleursClients.isEmpty()) {
+                f.row();
+                f.row("**Meilleurs clients", "**Montant (FCFA)", "**Achats");
+                for (Finances.Client cl : m.meilleursClients) {
+                    f.row(cl.nom != null && !cl.nom.trim().isEmpty() ? cl.nom.trim() : cl.numero, fcfa(cl.montant), (long) cl.operations);
+                }
+            }
+        }
+        return w.bytes();
+    }
+
+    /**
+     * Classeur « Toutes mes caisses » : une ligne par caisse puis le détail par jour, à partir des résumés envoyés
+     * par chaque téléphone (montants en centimes dans la réponse du serveur).
+     */
+    public static byte[] consolide(org.json.JSONObject vue, String periodLabel, long now) throws IOException {
+        XlsxWriter w = new XlsxWriter();
+        XlsxWriter.Sheet s = w.sheet("Toutes les caisses", 26, 12, 15, 15, 15, 13, 15, 14, 14, 11, 15, 15, 16).noHeader();
+        s.row("**Carnet Mobile Money : toutes mes caisses");
+        s.row("Période", periodLabel);
+        s.row("Exporté le", new Date(now));
+        s.row();
+        s.row("**Caisse", "**Opérations", "**Ventes (FCFA)", "**Achats (FCFA)", "**Charges (FCFA)", "**Frais (FCFA)", "**Résultat (FCFA)",
+                "**Apports perso", "**Retraits perso", "**À classer", "**Solde OM", "**Solde MoMo", "**Trésorerie");
+        org.json.JSONArray cs = vue.optJSONArray("caisses");
+        long[] tot = new long[9];
+        if (cs != null) for (int i = 0; i < cs.length(); i++) {
+            org.json.JSONObject c = cs.optJSONObject(i);
+            if (c == null) continue;
+            long[] v = {c.optLong("nb_operations"), c.optLong("ventes"), c.optLong("achats"), c.optLong("charges"), c.optLong("frais"),
+                    c.optLong("resultat"), c.optLong("apports"), c.optLong("retraits"), c.optLong("a_classer")};
+            for (int k = 0; k < v.length; k++) tot[k] += v[k];
+            s.row(c.optString("nom", ""), v[0], fcfa(v[1]), fcfa(v[2]), fcfa(v[3]), fcfa(v[4]), fcfa(v[5]), fcfa(v[6]), fcfa(v[7]), v[8],
+                    c.isNull("solde_om") ? null : fcfa(c.optLong("solde_om")), c.isNull("solde_momo") ? null : fcfa(c.optLong("solde_momo")),
+                    c.isNull("tresorerie") ? null : fcfa(c.optLong("tresorerie")));
+        }
+        s.row("**Total", tot[0], fcfa(tot[1]), fcfa(tot[2]), fcfa(tot[3]), fcfa(tot[4]), fcfa(tot[5]), fcfa(tot[6]), fcfa(tot[7]), tot[8]);
+        s.row();
+        s.row("**Comment lire");
+        s.row("Résultat", "Ventes − achats − charges − frais opérateur, d'après le classement fait sur chaque téléphone.");
+        s.row("Soldes", "Dernier solde lu dans les SMS de chaque caisse, jusqu'à la fin de la période.");
+        s.row("Mise à jour", "Chaque téléphone envoie ses chiffres à chaque sauvegarde : un téléphone resté sans réseau peut être en retard.");
+
+        XlsxWriter.Sheet j = w.sheet("Par jour", 12, 26, 12, 15, 15, 15, 13, 15, 11, 15, 15, 15);
+        j.row("Jour", "Caisse", "Opérations", "Ventes (FCFA)", "Achats (FCFA)", "Charges (FCFA)", "Frais (FCFA)", "Résultat (FCFA)",
+                "À classer", "Solde OM", "Solde MoMo", "Espèces comptées");
+        org.json.JSONArray js = vue.optJSONArray("jours");
+        if (js != null) for (int i = 0; i < js.length(); i++) {
+            org.json.JSONObject x = js.optJSONObject(i);
+            if (x == null) continue;
+            j.row(x.optString("jour", ""), x.optString("caisse", ""), x.optLong("nb_operations"), fcfa(x.optLong("ventes")),
+                    fcfa(x.optLong("achats")), fcfa(x.optLong("charges")), fcfa(x.optLong("frais")), fcfa(x.optLong("resultat")),
+                    x.optLong("a_classer"), x.isNull("solde_om") ? null : fcfa(x.optLong("solde_om")),
+                    x.isNull("solde_momo") ? null : fcfa(x.optLong("solde_momo")),
+                    x.isNull("especes_compte") ? null : fcfa(x.optLong("especes_compte")));
+        }
         return w.bytes();
     }
 
