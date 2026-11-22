@@ -184,8 +184,11 @@ async function load(all){
   try {
     const t = { stats: rpc("admin_stats") };
     if (all || ["apercu","recharges"].includes(tab)) t.recharges = rpc("admin_recharges", { p_statut: null });
+    if (all || tab==="recharges") t.recus = rpc("admin_recus", { p_jours: 30 }).catch(()=>[]);
     if (all || ["apercu","comptes"].includes(tab)) t.comptes = rpc("admin_comptes");
     if (all || tab==="comptes") t.caisses = rpc("admin_caisses").catch(()=>[]);
+    if (all || ["comptes","applications"].includes(tab)) t.modules = rpc("admin_modules").catch(()=>null);
+    if (all || tab==="applications") t.alertes = rpc("admin_alertes").catch(()=>null);
     if (all || tab==="exports") t.exports = rpc("admin_exports", { p_jours: 30 });
     if (all || tab==="appareils") t.appareils = rpc("admin_appareils");
     if (all || tab==="incidents") t.incidents = rpc("admin_incidents", { p_jours: 30 });
@@ -200,7 +203,7 @@ async function load(all){
 }
 
 // ---------- Affichage ----------
-const TABS = [["apercu","Vue d'ensemble"],["recharges","Recharges"],["comptes","Comptes"],["exports","Exports"],["appareils","Téléphones"],["incidents","Incidents"],["parametres","Paramètres"]];
+const TABS = [["apercu","Vue d'ensemble"],["recharges","Recharges"],["comptes","Comptes"],["applications","Applications"],["exports","Exports"],["appareils","Téléphones"],["incidents","Incidents"],["parametres","Paramètres"]];
 function render(){
   const s = cache.stats || {};
   $("tabs").innerHTML = TABS.map(([k,l])=>{
@@ -208,7 +211,7 @@ function render(){
     return `<button class="${k===tab?"on":""}" data-tab="${k}">${l}${n?`<span class="n">${n}</span>`:""}</button>`;
   }).join("");
   $("tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{ tab=b.dataset.tab; render(); load(false); });
-  $("view").innerHTML = ({apercu,recharges,comptes,exports,appareils,incidents,parametres})[tab]();
+  $("view").innerHTML = ({apercu,recharges,comptes,applications,exports,appareils,incidents,parametres})[tab]();
   bind();
 }
 
@@ -245,12 +248,18 @@ function recharges(){
   const rows = (cache.recharges||[]).filter(p=>!filtreRecharge || p.statut===filtreRecharge);
   return `<div class="bar"><select id="fRec">
       ${[["en_attente","En attente"],["valide","Validées"],["refuse","Refusées"],["","Toutes"]].map(([v,l])=>`<option value="${v}" ${v===filtreRecharge?"selected":""}>${l}</option>`).join("")}
-    </select><span class="muted">Vérifiez chaque ID et montant dans l'historique de votre numéro marchand avant de valider.</span></div>
+    </select><span class="muted">Validation automatique : dès que l'application de votre téléphone marchand lit le SMS du transfert reçu (même ID et même montant, ou même numéro et même montant à moins de 3 h), la recharge est validée. Sinon, vérifiez l'ID et le montant dans l'historique de votre numéro avant de valider à la main.</span></div>
     <div class="tablewrap"><table><thead><tr><th>Déclarée le</th><th>Client</th><th>Opérateur</th><th>ID de transaction</th><th class="num">Montant</th><th class="num">Solde actuel</th><th>Statut</th><th></th></tr></thead><tbody>
     ${rows.map(p=>`<tr><td>${dt(p.cree)}</td><td>${tel(p.telephone)}</td><td class="op-${esc(p.operateur)}">${esc(OPS[p.operateur]||p.operateur)}</td>
       <td class="mono">${p.operateur==="ADMIN"?'<span class="muted">—</span>':esc(p.reference)}</td><td class="num">${fcfa(p.montant)}</td><td class="num">${fcfa(p.solde)}</td>
       <td>${tag(p.statut)}${p.motif?`<div class="muted" style="font-size:12px">${esc(p.motif)}</div>`:""}${p.traite?`<div class="muted" style="font-size:12px">${dt(p.traite)}</div>`:""}</td>
       <td>${p.statut==="en_attente"?`<div class="actions"><button class="b p" data-valider="${p.id}">Valider</button><button class="b x" data-refuser="${p.id}">Refuser</button></div>`:""}</td></tr>`).join("") || `<tr><td colspan="8" class="empty">Aucune recharge.</td></tr>`}
+    </tbody></table></div>
+    <h3 style="margin:18px 0 8px;font-size:15px">Transferts reçus par le téléphone marchand · 30 jours</h3>
+    <div class="tablewrap"><table><thead><tr><th>Reçu le</th><th>Opérateur</th><th>De</th><th>ID de transaction</th><th class="num">Montant</th><th>Recharge</th></tr></thead><tbody>
+    ${(cache.recus||[]).map(x=>`<tr><td>${dt(x.quand)}</td><td class="op-${esc(x.operateur)}">${esc(OPS[x.operateur]||x.operateur)}</td><td>${tel(x.numero)}</td>
+      <td class="mono">${esc(x.reference)}</td><td class="num">${fcfa(x.montant)}</td>
+      <td>${x.recharge_id?`${tag("valide")} <span class="muted" style="font-size:12px">compte ${tel(x.telephone)}</span>`:`<span class="muted">aucune recharge déclarée</span>`}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">Aucun transfert reçu transmis. Ouvrez l'application sur le téléphone marchand, connecté au compte superadmin.</td></tr>`}
     </tbody></table></div>`;
 }
 
@@ -260,14 +269,37 @@ function comptes(){
   const rows = (cache.comptes||[]).filter(c=>!q || String(c.telephone||"").includes(q));
   return `<div class="bar"><input id="qCompte" placeholder="Rechercher un numéro" value="${esc(rechercheCompte)}" inputmode="tel"></div>
     <div class="tablewrap"><table><thead><tr><th>Numéro</th><th class="num">Solde</th><th class="num">Exports</th><th class="num">Dépensé</th><th>Dernier export</th><th>Dernière sauvegarde</th><th>Note</th><th></th></tr></thead><tbody>
-    ${rows.map(c=>`<tr><td>${tel(c.telephone)}${c.suspendu?" "+tag("suspendu"):""}<div class="muted" style="font-size:12px">depuis ${d(c.cree)} · ${c.appareils} tél. · ${nbCaisses(c.user_id)} caisse(s)</div></td>
+    ${rows.map(c=>`<tr><td>${tel(c.telephone)}${c.suspendu?" "+tag("suspendu"):""}<div class="muted" style="font-size:12px">depuis ${d(c.cree)} · ${c.appareils} tél. · ${nbCaisses(c.user_id)} caisse(s)</div><div style="font-size:12px">${modulesCompte(c.user_id).map(x=>`<span class="tag">${esc(nomModule(x))}</span>`).join(" ") || '<span class="muted">base gratuite</span>'}</div></td>
       <td class="num ${c.solde<0?"bad":""}"><b>${fcfa(c.solde)}</b>${c.recharges_en_attente?`<div>${tag("en_attente")}</div>`:""}</td>
       <td class="num">${c.exports}${c.offerts_utilises?`<div class="muted" style="font-size:12px">dont ${c.offerts_utilises} offert</div>`:""}</td>
       <td class="num">${fcfa(c.depense)}</td><td>${d(c.dernier_export)}</td><td>${ago(c.dernier_sync)}</td><td>${esc(c.note||"")}</td>
-      <td><div class="actions"><button class="b" data-crediter="${c.user_id}">Créditer</button><button class="b" data-modifier="${c.user_id}">Modifier</button></div></td></tr>`).join("") || `<tr><td colspan="8" class="empty">Aucun compte.</td></tr>`}
+      <td><div class="actions"><button class="b" data-crediter="${c.user_id}">Créditer</button><button class="b" data-modifier="${c.user_id}">Modifier</button><button class="b" data-offrir="${c.user_id}">Offrir</button></div></td></tr>`).join("") || `<tr><td colspan="8" class="empty">Aucun compte.</td></tr>`}
     </tbody></table></div>`;
 }
 
+function modulesCompte(uid){ const r=((cache.modules||{}).comptes||[]).find(x=>x.user_id===uid); return r ? (r.actifs||[]) : []; }
+function nomModule(code){ const m=((cache.modules||{}).catalogue||[]).find(x=>x.code===code); return m ? m.nom : code; }
+function applications(){
+  const m = cache.modules;
+  if (!m) return `<p class="muted">Chargement… (le serveur doit avoir supabase/modules.sql appliqué)</p>`;
+  const row = x => `<tr><td><b>${esc(x.nom)}</b>${x.est_pack?` <span class="tag">pack</span>`:""}<div class="muted" style="font-size:12px;max-width:420px">${esc(x.description)}${x.est_pack?` · contient ${x.contenu.map(nomModule).map(esc).join(", ")}${x.telephones>1?` · ${x.telephones} téléphones`:""}`:""}</div></td>
+      <td class="num"><input data-prix="${esc(x.code)}" type="number" step="100" min="0" value="${x.prix}" style="width:100px">${x.par_telephone?`<div class="muted" style="font-size:12px">par téléphone en plus</div>`:""}</td>
+      <td><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" data-actif="${esc(x.code)}" ${x.actif?"checked":""} style="width:auto"> proposée</label></td>
+      <td class="num">${x.abonnes}${x.essais?`<div class="muted" style="font-size:12px">dont ${x.essais} en essai</div>`:""}</td><td class="num">${fcfa(x.revenu_mois)}</td>
+      <td><button class="b" data-savemod="${esc(x.code)}">Enregistrer</button></td></tr>`;
+  return `<div class="kpis"><div class="card kpi good"><div class="l">Applications · ce mois</div><div class="v">${fcfa(m.revenu_mois)}</div><div class="muted" style="font-size:12px;margin-top:2px">achats et renouvellements</div></div></div>
+    <p class="muted">Base gratuite pour tous (lecture des SMS, journal, entrées et dépenses). Chaque application : essai gratuit à la première activation, puis abonnement mensuel prélevé sur le porte-monnaie. Un nouveau prix s'applique aux activations et renouvellements suivants.</p>
+    <div class="tablewrap"><table><thead><tr><th>Application</th><th class="num">Prix / mois (FCFA)</th><th>Catalogue</th><th class="num">Actifs</th><th class="num">Revenu du mois</th><th></th></tr></thead><tbody>
+    ${(m.catalogue||[]).map(row).join("")}</tbody></table></div>${alertesBloc()}`;
+}
+function alertesBloc(){
+  const a = cache.alertes; if (!a) return "";
+  const j = a.jour || {};
+  return `<h3 style="margin:18px 0 8px;font-size:15px">Alertes WhatsApp</h3>
+    <p class="muted">Sur 24 h : ${j.envoye||0} envoyée(s), ${j.en_attente||0} en attente, ${(j.echec||0)+(j.expire||0)} en échec ou expirée(s) · ${a.mois} envoyée(s) ce mois · ${a.destinataires} numéro(s) confirmé(s).
+    Si tout reste « en attente » : secrets WHATSAPP_TOKEN et WHATSAPP_PHONE_ID absents dans Supabase → Edge Functions → Secrets.</p>
+    ${(a.erreurs||[]).length?`<div class="tablewrap"><table><thead><tr><th>Quand</th><th>Type</th><th>Erreur</th></tr></thead><tbody>${a.erreurs.map(x=>`<tr><td>${dt(x.quand)}</td><td>${esc(x.type)}</td><td>${esc(x.erreur||"")}</td></tr>`).join("")}</tbody></table></div>`:""}`;
+}
 function nbCaisses(uid){ const r=(cache.caisses||[]).find(x=>x.user_id===uid); return r ? r.caisses : (demo ? 1 : 0); }
 
 function exports(){
@@ -305,11 +337,13 @@ const PARAMS = [
   ["seuil_export","Seuil en nombre d'opérations","200"],
   ["prix_export_grand","Prix d'un export au-delà du seuil (FCFA)","1000"],
   ["exports_offerts","Exports offerts à chaque nouveau compte","1"],
-  ["recharge_min","Recharge minimum (FCFA)","500"]];
+  ["recharge_min","Recharge minimum (FCFA)","500"],
+  ["ussd_om","Code du menu Orange Money ouvert par « Payer » ({numero} et {montant} possibles)","#150#"],
+  ["ussd_momo","Code du menu MTN MoMo ouvert par « Payer »","*126#"]];
 function parametres(){
   const v = Object.fromEntries((cache.parametres||[]).map(p=>[p.cle,p.valeur]));
   return `<div class="card" style="max-width:560px">
-    ${PARAMS.map(([k,l,ph])=>`<label for="p_${k}">${l}</label><input id="p_${k}" value="${esc(v[k]??"")}" placeholder="${ph}" ${/numero/.test(k)?'inputmode="tel"':/nom/.test(k)?"":'inputmode="numeric"'}>`).join("")}
+    ${PARAMS.map(([k,l,ph])=>`<label for="p_${k}">${l}</label><input id="p_${k}" value="${esc(v[k]??"")}" placeholder="${ph}" ${/numero/.test(k)?'inputmode="tel"':/nom|ussd/.test(k)?"":'inputmode="numeric"'}>`).join("")}
     <p class="muted" style="font-size:12px">Les nouveaux tarifs s'appliquent au prochain export de chaque client (l'application les reçoit à sa prochaine connexion). Les numéros s'affichent dans l'écran Exporter → Recharger.</p>
     <div class="actions"><button class="b p" id="saveParams">Enregistrer</button></div></div>`;
 }
@@ -324,6 +358,11 @@ function bind(){
   document.querySelectorAll("[data-crediter]").forEach(b=>b.onclick=()=>crediter(b.dataset.crediter));
   document.querySelectorAll("[data-modifier]").forEach(b=>b.onclick=()=>modifier(b.dataset.modifier));
   const sp=$("saveParams"); if(sp) sp.onclick=saveParams;
+  document.querySelectorAll("[data-offrir]").forEach(b=>b.onclick=()=>offrir(b.dataset.offrir));
+  document.querySelectorAll("[data-savemod]").forEach(b=>b.onclick=()=>{
+    const code=b.dataset.savemod, prix=+document.querySelector(`[data-prix="${code}"]`).value, actif=document.querySelector(`[data-actif="${code}"]`).checked;
+    act("admin_module", { p_code: code, p_prix: prix, p_actif: actif }, nomModule(code) + " : " + fcfa(prix) + " par mois" + (actif ? "" : ", retirée du catalogue") + ".");
+  });
 }
 
 function dialog(html, onOk, okLabel="Confirmer", danger=false){
@@ -350,6 +389,16 @@ function refuser(id){
   dialog(`<h3>Refuser cette recharge ?</h3><p class="mono">${esc(p.reference)} · ${fcfa(p.montant)}</p>
     <label for="motif">Motif (visible par le client dans son historique)</label><select id="motif"><option>ID introuvable dans l'historique</option><option>Montant différent du transfert reçu</option><option>Doublon</option><option>Autre</option></select>`,
     f => act("admin_refuser_recharge", { p_id: id, p_motif: f.querySelector("#motif").value }, "Recharge refusée."), "Refuser", true);
+}
+function offrir(uid){
+  const c = cache.comptes.find(x=>x.user_id===uid);
+  const cat = ((cache.modules||{}).catalogue||[]);
+  dialog(`<h3>Offrir une application à ${tel(c.telephone)}</h3><p class="muted">L'application est active pendant ces jours, sans rien débiter. Ensuite le client choisit de la garder (payante) ou non.</p>
+    <label for="om">Application</label><select id="om">${cat.map(x=>`<option value="${esc(x.code)}">${esc(x.nom)}</option>`).join("")}</select>
+    <label for="oj">Nombre de jours</label><input id="oj" type="number" min="1" max="366" value="30">
+    <label for="oo">Motif</label><input id="oo" value="Geste commercial">`,
+    f => act("admin_offrir_module", { p_user: uid, p_code: f.querySelector("#om").value, p_jours: +f.querySelector("#oj").value, p_motif: f.querySelector("#oo").value },
+      "Application offerte."), "Offrir");
 }
 function crediter(uid){
   const c = cache.comptes.find(x=>x.user_id===uid);
@@ -406,9 +455,21 @@ const Demo = (() => {
   const incidents = [
     {telephone:"655778899",type:"SAUVEGARDE_ECHEC",message:"Pas de connexion internet ou serveur injoignable.",version_app:"0.6",cree:iso(now-30*36e5)},
     {telephone:"677445566",type:"SMS_NON_RECONNUS",message:"3 SMS mobile money non reconnus sur ce téléphone (contenu non transmis).",version_app:"0.6",cree:iso(now-2*J)}];
-  const parametres = [{cle:"nom_marchand",valeur:"Carnet Mobile Money"},{cle:"numero_om",valeur:"690000000"},{cle:"numero_momo",valeur:"670000000"},{cle:"prix_export_petit",valeur:"500"},{cle:"seuil_export",valeur:"200"},{cle:"prix_export_grand",valeur:"1000"},{cle:"exports_offerts",valeur:"1"},{cle:"recharge_min",valeur:"500"}];
+  const parametres = [{cle:"nom_marchand",valeur:"Carnet Mobile Money"},{cle:"numero_om",valeur:"690000000"},{cle:"numero_momo",valeur:"670000000"},{cle:"prix_export_petit",valeur:"500"},{cle:"seuil_export",valeur:"200"},{cle:"prix_export_grand",valeur:"1000"},{cle:"exports_offerts",valeur:"1"},{cle:"recharge_min",valeur:"500"},{cle:"ussd_om",valeur:"#150#"},{cle:"ussd_momo",valeur:"*126#"}];
+  const modules = {revenu_mois: 6800, catalogue: [
+      {code:"PACK_PARTICULIER",nom:"Pack Particulier",description:"Suivi de l'argent + Dettes & créances.",prix:800,est_pack:true,contenu:["SUIVI","DETTES"],telephones:1,actif:true,abonnes:4,essais:2,revenu_mois:1600},
+      {code:"PACK_COMMERCANT",nom:"Pack Commerçant",description:"Caisse commerçant + Finances & budgets + Dettes & créances.",prix:2000,est_pack:true,contenu:["CAISSE","FINANCES","DETTES"],telephones:1,actif:true,abonnes:3,essais:1,revenu_mois:4000},
+      {code:"PACK_ENTREPRISE",nom:"Pack Entreprise",description:"Toutes les applications, jusqu'à 3 téléphones.",prix:4000,est_pack:true,contenu:["CAISSE","FINANCES","SUIVI","DETTES","MULTI"],telephones:3,actif:true,abonnes:0,essais:0,revenu_mois:0},
+      {code:"CAISSE",nom:"Caisse commerçant",description:"Espèces, fond de caisse, écart réel / théorique, journée de caisse, mode agent.",prix:1000,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:2,essais:1,revenu_mois:1000},
+      {code:"FINANCES",nom:"Finances & budgets",description:"Trésorerie, résultat, budgets, meilleurs clients. Export Excel inclus.",prix:1000,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:1,essais:1,revenu_mois:0},
+      {code:"SUIVI",nom:"Suivi de l'argent",description:"Salaire ou argent reçu suivi jusqu'à la dernière dépense.",prix:500,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:0,essais:0,revenu_mois:0},
+      {code:"DETTES",nom:"Dettes & créances",description:"Qui me doit, à qui je dois, échéances.",prix:500,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:1,essais:0,revenu_mois:200},
+      {code:"MULTI",nom:"Multi-téléphones",description:"Une caisse par téléphone, code patron.",prix:1000,par_telephone:true,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:0,essais:0,revenu_mois:0}],
+    comptes: [{user_id:u(1),actifs:["CAISSE","DETTES","FINANCES"]},{user_id:u(2),actifs:["SUIVI","DETTES"]}]};
+  const recus = [{id:3,operateur:"MOMO",reference:"8472619305",montant:5000,numero:"690112233",quand:iso(now-9*J),recharge_id:11,telephone:"690112233"},
+    {id:4,operateur:"OM",reference:"PP251121.0915.B77120",montant:2000,numero:"691234567",quand:iso(now-5*36e5),recharge_id:null,telephone:null}];
   const stats = {comptes:5,nouveaux_7_jours:2,clients_payants:3,soldes_total:15500,soldes_negatifs:1,recharges_en_attente:1,montant_en_attente:5000,recharges_mois:5000,exports_mois:4,exports_payants_mois:3,revenu_exports_mois:2500,appareils:3,appareils_silencieux:1,incidents_7_jours:2};
-  return { rpc: async (n) => ({admin_stats:stats,admin_comptes:comptes,admin_recharges:recharges,admin_exports:exports,admin_appareils:appareils,admin_incidents:incidents,parametres})[n] ?? null };
+  return { rpc: async (n) => ({admin_stats:stats,admin_comptes:comptes,admin_recharges:recharges,admin_exports:exports,admin_appareils:appareils,admin_incidents:incidents,admin_recus:recus,admin_modules:modules,admin_alertes:{jour:{envoye:12,en_attente:1},mois:148,destinataires:5,erreurs:[]},parametres})[n] ?? null };
 })();
 
 init();

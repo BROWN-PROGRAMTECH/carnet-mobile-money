@@ -2,6 +2,84 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Version 0.12 : Alertes WhatsApp
+
+Nouvelle application **Alertes WhatsApp** : 200 FCFA par mois, 14 jours d'essai, incluse dans le Pack Entreprise.
+- **Messages** :
+  - **bilan du soir** par caisse, à l'heure choisie (20 h par défaut) ;
+  - **écart de caisse** à la clôture ;
+  - **SMS manquant ou faux** (chaîne des soldes rompue, dernières 48 heures) ;
+  - **solde OM ou MoMo bas**, sous un seuil réglable ;
+  - **échéances de dettes** du jour et en retard.
+- **Destinataires** : le patron et jusqu'à 2 autres numéros, chacun confirmé par un code reçu sur WhatsApp.
+- **Réglages** dans Compte → Alertes WhatsApp : choix des messages, heure du bilan, seuils, bouton « Envoyer le bilan maintenant », derniers envois.
+- **Fonctionnement** : le téléphone de chaque caisse prépare ses alertes à chaque synchronisation (toutes les heures, et à chaque SMS reçu). Le serveur les envoie par l'API WhatsApp Business de Meta.
+- **Garde-fous** : jamais deux fois la même alerte, 30 messages par jour et par compte au plus, expiration au bout de 24 heures.
+- **Activation de l'envoi** : il faut un compte WhatsApp Business chez Meta et 5 modèles validés. Voir `docs/whatsapp-meta.md`.
+- **Tableau de bord** : bloc « Alertes WhatsApp » dans l'onglet Applications (envois, erreurs).
+
+> Serveur : `supabase/alertes.sql` et la fonction `supabase/functions/whatsapp` sont déjà installés.
+
+## Version 0.11 : applications à la carte
+
+L'application est maintenant découpée en **applications**, comme Odoo. Chacun installe seulement ce qui lui sert.
+
+**Base gratuite pour tous** : lecture des SMS Orange Money, MTN MoMo et banques, journal et classement, entrées et dépenses par catégorie, soldes, catégories personnelles, sauvegarde.
+
+**Applications (prix par mois, modifiables dans le tableau de bord)** :
+| Application | Contenu | Prix |
+|---|---|---|
+| Caisse commerçant | Espèces, fond de caisse, clôture et écart, mode agent | 1 000 |
+| Finances & budgets | Trésorerie, résultat, budgets, meilleurs clients, **export Excel inclus** | 1 000 |
+| Suivi de l'argent | Salaire ou argent reçu suivi, retraits répartis | 500 |
+| Dettes & créances | Qui me doit, à qui je dois, échéances | 500 |
+| Multi-téléphones | Une caisse par téléphone, code patron, vue globale | 1 000 par téléphone en plus |
+| Pack Particulier | Suivi de l'argent + Dettes | 800 |
+| Pack Commerçant | Caisse + Finances + Dettes | 2 000 |
+| Pack Entreprise | Tout, jusqu'à 3 téléphones | 4 000 |
+
+**Règles** :
+- **Inscription** : choix du profil (Particulier, Commerçant, Entreprise ou Sur mesure) ; les applications correspondantes s'installent avec **14 jours d'essai gratuit**.
+- **Abonnement mensuel** prélevé sur le porte-monnaie, renouvelé tout seul si le solde suffit (vérifié à chaque ouverture). Une notification prévient si le solde ne couvre pas les renouvellements des 3 prochains jours.
+- **Non renouvelée** : l'application passe en **lecture seule**. Les données restent visibles, mais on ne peut plus rien ajouter. Rien n'est perdu.
+- **Arrêt du renouvellement** à tout moment ; l'application reste active jusqu'à la fin du mois payé.
+- **Export Excel** : inclus avec Finances & budgets ; sinon payé au fichier comme avant (premier export offert).
+- **Deuxième téléphone** : demande Multi-téléphones (ou le Pack Entreprise) ; reprendre la caisse d'un ancien téléphone reste libre.
+- **Comptes déjà inscrits** : toutes les applications offertes 1 mois. Un bandeau rappelle de choisir 7 jours avant la fin.
+- **Sans compte** : base gratuite seulement.
+
+**Dans l'application** : Compte → **Mes applications** → catalogue (installer, activer, arrêter). Une partie non installée montre une carte de présentation à sa place (Caisse, Finances, Suivi, Dettes).
+
+**Tableau de bord** : onglet **Applications** (prix, retrait du catalogue, abonnés, revenu du mois). Dans Comptes, les applications de chaque client et un bouton **Offrir** (des jours d'une application ou d'un pack).
+
+> Serveur : `supabase/modules.sql`, à appliquer (SQL Editor → coller → Run) si ce n'est pas déjà fait.
+
+## Version 0.10 : paiement en un geste, suivi de l'argent, dettes et créances
+
+**Recharge du porte-monnaie en un geste** :
+1. Choisissez Orange Money ou MTN MoMo et tapez le montant (boutons 1 000 / 2 000 / 5 000 / 10 000).
+2. Touchez **Payer** : le menu de l'opérateur s'ouvre (#150# ou *126#). L'écran garde sous les yeux le numéro et le montant à saisir. Validez avec votre code secret, que l'application ne voit jamais.
+3. Dès que le SMS de confirmation arrive, l'application retrouve le transfert (même opérateur, même montant, vers le numéro marchand) et **déclare seule son ID**. Une notification confirme.
+- **Validation automatique** : le téléphone marchand (compte superadmin) transmet les transferts qu'il reçoit. La recharge est validée dès qu'un transfert reçu correspond : même ID et même montant, ou, à défaut, même montant envoyé depuis le numéro du compte à moins de 3 heures. Sinon elle reste en attente et se valide à la main dans le tableau de bord, comme avant.
+- Les codes du menu se règlent dans le tableau de bord (Paramètres). Un code peut contenir `{numero}` et `{montant}` si vous connaissez un raccourci complet.
+- En secours : « J'ai payé autrement : déclarer l'ID à la main ».
+
+**Suivi de l'argent** (onglet Finances, ou bouton dans une opération) :
+- **Répartir une sortie** (retrait, gros transfert) : par exemple, un retrait de 50 000 devient 10 000 de transport, 30 000 de salaires et 10 000 prêtés à Paul. Chaque part prend sa catégorie dans les totaux et le résultat. Le reste garde la catégorie de la sortie ; sans catégorie, il reste « À classer » avec un **reste à justifier**.
+- **Suivre un argent reçu** (salaire, argent reçu, vente importante) : ajoutez les dépenses payées avec cet argent, ou rattachez des sorties déjà enregistrées (transfert OM, retrait, paiement en espèces). Vous voyez l'utilisé et le **reste disponible**.
+
+**Dettes et créances par personne** (communes à tous les téléphones du compte) :
+- Nouvelles catégories **Prêt accordé** (sortie) et **Remboursement reçu** (entrée), à côté de **Emprunt** et **Remboursement de dette**. Toutes sont hors résultat.
+- En classant une opération dans l'une d'elles, indiquez la personne (proposée d'après le SMS) et, pour un prêt, la date de remboursement prévue.
+- Fonctionne aussi pour une part de retrait (ex. 10 000 prêtés à Paul), un mouvement d'espèces et une dette ancienne saisie à la main.
+- Carte **Dettes et créances** : « On me doit », « Je dois », retards, et le total trésorerie + on me doit − je dois. L'écran d'une personne montre son solde, son échéance et tout l'historique.
+
+**Entrées et sorties par catégorie** : le mois, catégorie par catégorie (montant et %). Touchez une ligne pour voir les opérations.
+
+**Export Excel** : nouvelles feuilles « Dépenses suivies » et « Dettes et créances ». Le journal indique les sorties réparties et leur reste.
+
+> Serveur déjà à jour (`supabase/suivi.sql` appliqué).
+
 ## Version 0.9.1 : vos catégories, choix par recherche, recharge simplifiée
 
 **Catégories personnalisées** (communes à tous les téléphones du compte) :

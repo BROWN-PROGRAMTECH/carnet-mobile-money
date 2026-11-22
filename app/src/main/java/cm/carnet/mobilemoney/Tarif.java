@@ -22,6 +22,8 @@ public final class Tarif {
         /** Prix normal, même quand l'export est offert. */
         public int prixNormal;
         public boolean offert, possible;
+        /** Export inclus avec l'application Finances & budgets (version 0.11). */
+        public boolean inclus;
         /** Solde après l'export. */
         public long soldeApres;
         /** Ce qui manque pour pouvoir exporter (0 si possible). */
@@ -29,7 +31,18 @@ public final class Tarif {
     }
 
     public static Decision decider(int nb, long solde, int offertsRestants, int petit, int grand, int seuil) {
+        return decider(nb, solde, offertsRestants, petit, grand, seuil, false);
+    }
+
+    public static Decision decider(int nb, long solde, int offertsRestants, int petit, int grand, int seuil, boolean inclus) {
         Decision d = new Decision();
+        if (inclus) {
+            d.prixNormal = prix(nb, petit, grand, seuil);
+            d.inclus = true;
+            d.possible = true;
+            d.soldeApres = solde;
+            return d;
+        }
         d.prixNormal = prix(nb, petit, grand, seuil);
         d.offert = d.prixNormal > 0 && offertsRestants > 0;
         d.prix = d.offert ? 0 : d.prixNormal;
