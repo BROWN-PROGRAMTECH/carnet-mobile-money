@@ -42,6 +42,12 @@ public final class Exporter {
     /** Classeur complet ; tresorerie et budgets (facultatifs) ajoutent la feuille « Finances ». */
     public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now,
                               Finances.Tresorerie tresorerie, Map<String, Long> budgets) throws IOException {
+        return xlsx(r, bilan, from, to, periodLabel, now, tresorerie, budgets, null);
+    }
+
+    /** Avec, en plus, les dettes et créances par personne (version 0.10). */
+    public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now,
+                              Finances.Tresorerie tresorerie, Map<String, Long> budgets, Dettes.Bilan dettes) throws IOException {
         XlsxWriter w = new XlsxWriter();
 
         XlsxWriter.Sheet s = w.sheet("Synthèse", 28, 16, 16, 12, 16, 16, 14, 14, 14).noHeader();
@@ -85,7 +91,9 @@ public final class Exporter {
             Txn t = l.sms;
             j.row(new Date(t.date), Txn.opName(t.op), t.typeLabel(), sens(t), fcfa(t.montant), t.frais == 0 ? null : fcfa(t.frais),
                     fcfa(t.solde != null ? t.solde : t.apres), t.nom, t.numero, t.txnId,
-                    Caisse.categorieNom(l.categorie) + (l.auto ? " (auto)" : ""), l.motif, controle(t));
+                    Caisse.categorieNom(l.categorie) + (l.auto ? " (auto)" : "")
+                            + (l.reparti > 0 ? " · réparti " + SmsParser.fmt(l.reparti) + (l.reste() > 0 ? ", reste " + SmsParser.fmt(l.reste()) : "") : ""),
+                    l.motif, controle(t));
         }
 
         XlsxWriter.Sheet c = w.sheet("À classer", 17, 14, 20, 9, 13, 24, 12, 24);
@@ -104,6 +112,33 @@ public final class Exporter {
         for (Caisse.Saisie x : me)
             es.row(new Date(x.date), x.sens > 0 ? "Entrée" : "Sortie", fcfa(x.montant), Caisse.categorieNom(Caisse.normaliserSaisie(x.categorie, x.sens)), x.libelle,
                     x.annule ? "Annulée" : "Valide");
+
+        if (!bilan.depensesSuivies.isEmpty()) {
+            XlsxWriter.Sheet ds = w.sheet("Dépenses suivies", 17, 13, 24, 30, 28, 12);
+            ds.row("Date", "Montant (FCFA)", "Catégorie", "Motif", "Payée avec (opération)", "Statut");
+            List<Caisse.Saisie> dl = new ArrayList<>(bilan.depensesSuivies);
+            Collections.reverse(dl);
+            for (Caisse.Saisie x : dl)
+                ds.row(new Date(x.date), fcfa(x.montant), Caisse.categorieNom(Caisse.normaliserSaisie(x.categorie, x.sens)), x.libelle,
+                        x.source, x.annule ? "Annulée" : "Valide");
+        }
+
+        if (dettes != null && !dettes.personnes.isEmpty()) {
+            XlsxWriter.Sheet dt = w.sheet("Dettes et créances", 26, 16, 16, 16, 16, 14).noHeader();
+            dt.row("**Dettes et créances au moment de l'export", new Date(now));
+            dt.row("On me doit (FCFA)", fcfa(dettes.onMeDoit));
+            dt.row("Je dois (FCFA)", fcfa(dettes.jeDois));
+            dt.row();
+            dt.row("**Personne", "**Numéro", "**Me doit (FCFA)", "**Je lui dois (FCFA)", "**Échéance", "**Dernier mouvement");
+            for (Dettes.Personne p : dettes.personnes)
+                dt.row(p.nom, p.numero, p.creance == 0 ? null : fcfa(p.creance), p.dette == 0 ? null : fcfa(p.dette),
+                        p.echeance != null ? new Date(p.echeance) : null, new Date(p.derniere));
+            dt.row();
+            dt.row("**Mouvements", "**Date", "**Montant (FCFA)", "**Personne", "**Motif");
+            for (Dettes.Personne p : dettes.personnes)
+                for (Dettes.Engagement mv : p.mouvements)
+                    dt.row(Dettes.libelle(mv), new Date(mv.date), fcfa(mv.montant), p.nom, mv.motif);
+        }
 
         XlsxWriter.Sheet v = w.sheet("À vérifier", 17, 14, 40, 100);
         v.row("Date", "Compte", "Raison", "SMS");

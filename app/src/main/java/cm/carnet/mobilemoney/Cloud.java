@@ -27,7 +27,7 @@ import java.util.UUID;
 public final class Cloud {
     private Cloud() {}
 
-    public static final String VERSION_APP = "0.9.1";
+    public static final String VERSION_APP = "0.12";
     private static final String DOMAIN = "@carnet-mm.app";
     private static final int PAGE = 1000, BATCH = 500;
 
@@ -258,10 +258,13 @@ public final class Cloud {
                 }
             }
             registerDevice(c, tok, userId);
+            try { recharges(c, tok, st, null); } catch (Exception ignored) {}
             try { envoyerResumes(c, tok, userId, caisse, st); } catch (Exception e) { saveErrorResume(c, e); }
             try { rafraichirCaisses(c, tok); } catch (Exception ignored) {}
             envoyerPlantages(c, tok, userId);
             try { envoyerExportsEnAttente(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
+            try { rafraichirModules(c, tok); rappelModules(c); } catch (Exception ignored) {}
+            try { alertes(c, tok, st, false); } catch (Exception ignored) {}
             envoyerIncidents(c, tok, userId);
         } catch (CloudException e) {
             saveError(c, e.getMessage());
@@ -279,7 +282,7 @@ public final class Cloud {
 // ---------- Caisses (un compte, plusieurs téléphones) ----------
 
     /** Tables dont les lignes appartiennent à une caisse ; les règles par contact restent communes au compte. */
-    private static final java.util.Set<String> PAR_CAISSE = new java.util.HashSet<>(java.util.Arrays.asList("sms", "classement", "saisie", "jour", "budget", "avoir"));
+    private static final java.util.Set<String> PAR_CAISSE = new java.util.HashSet<>(java.util.Arrays.asList("sms", "classement", "saisie", "jour", "budget", "avoir", "suivi"));
     /** Tables dont la clé locale (« AAAA-MM-JJ », poste, identifiant) devient « caisse|clé » sur le serveur. */
     private static final java.util.Set<String> CLE_PAR_CAISSE = new java.util.HashSet<>(java.util.Arrays.asList("jour", "budget", "avoir"));
 
@@ -558,11 +561,15 @@ public final class Cloud {
         public int offertsRestants, prixPetit = Tarif.PETIT, prixGrand = Tarif.GRAND, seuil = Tarif.SEUIL, rechargeMin = 500;
         public int exportsHorsLigne;
         public boolean suspendu;
-        public String numeroOm = "", numeroMomo = "", marchand = "";
+        public String numeroOm = "", numeroMomo = "", marchand = "", ussdOm = "#150#", ussdMomo = "*126#";
+        /** Ce compte est le superadmin : son téléphone transmet les transferts reçus pour la validation automatique. */
+        public boolean admin;
+        /** Export Excel inclus avec l'application Finances & budgets (version 0.11). */
+        public boolean exportsInclus;
         public JSONArray historique = new JSONArray();
 
         public Tarif.Decision decider(int nb) {
-            return Tarif.decider(nb, solde, offertsRestants, prixPetit, prixGrand, seuil);
+            return Tarif.decider(nb, solde, offertsRestants, prixPetit, prixGrand, seuil, exportsInclus);
         }
     }
 
@@ -584,6 +591,10 @@ public final class Cloud {
                 w.numeroOm = str(o, "numero_om");
                 w.numeroMomo = str(o, "numero_momo");
                 w.marchand = str(o, "nom_marchand");
+                if (!str(o, "ussd_om").isEmpty()) w.ussdOm = str(o, "ussd_om");
+                if (!str(o, "ussd_momo").isEmpty()) w.ussdMomo = str(o, "ussd_momo");
+                w.admin = o.optBoolean("admin", false);
+                w.exportsInclus = o.optBoolean("exports_inclus", false);
                 w.enAttente = o.optLong("en_attente", 0);
                 JSONArray h = o.optJSONArray("historique");
                 if (h != null) w.historique = h;
@@ -592,6 +603,8 @@ public final class Cloud {
             }
         }
         w.verifie = p.getLong("pf_verifie", 0);
+        // Hors ligne : l'état des applications en mémoire suffit (Finances & budgets active = exports inclus).
+        if (modules(ctx).actif(Modules.FINANCES, System.currentTimeMillis())) w.exportsInclus = true;
         // Exports faits hors ligne, pas encore transmis : déjà déduits ici.
         try {
             JSONArray q = new JSONArray(p.getString("exports_attente", "[]"));
@@ -629,7 +642,7 @@ public final class Cloud {
     /** Résultat d'un débit d'export. */
     public static final class Debit {
         public int prix;
-        public boolean offert, horsLigne;
+        public boolean offert, horsLigne, inclus;
         public long solde;
     }
 
@@ -654,6 +667,7 @@ public final class Cloud {
             Debit d = new Debit();
             d.prix = r.optInt("prix", 0);
             d.offert = r.optBoolean("offert", false);
+            d.inclus = r.optBoolean("inclus", false);
             d.solde = r.optLong("solde", 0);
             memoriserSolde(c, d.solde, r.optInt("offerts_restants", 0));
             try { rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
@@ -737,7 +751,9 @@ public final class Cloud {
             body.put("p_montant", montant);
             JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/declarer_recharge", body.toString(), tok, null));
             try { rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
-            return "Recharge de " + Tarif.fcfa(r.optLong("montant", montant)) + " déclarée. Elle sera ajoutée à votre solde dès sa validation.";
+            String m = Tarif.fcfa(r.optLong("montant", montant));
+            if ("valide".equals(r.optString("statut", ""))) return "Recharge de " + m + " validée : votre porte-monnaie est crédité.";
+            return "Recharge de " + m + " déclarée (ID " + reference + "). Elle est ajoutée à votre solde dès que le paiement est reçu.";
         } catch (CloudException e) {
             throw e;
         } catch (Exception e) {
@@ -746,6 +762,389 @@ public final class Cloud {
     }
 
     
+    // ---------- Applications (0.11) ----------
+
+    /** État des applications, lu au dernier contact avec le serveur (vide si jamais lu). */
+    public static Modules.Etat modules(Context ctx) {
+        Modules.Etat e = new Modules.Etat();
+        String raw = prefs(ctx.getApplicationContext()).getString("mod_json", "");
+        if (raw.isEmpty()) return e;
+        try {
+            JSONObject o = new JSONObject(raw);
+            JSONArray cat = o.optJSONArray("catalogue");
+            if (cat != null) for (int i = 0; i < cat.length(); i++) {
+                JSONObject m = cat.getJSONObject(i);
+                Modules.Module x = new Modules.Module();
+                x.code = m.optString("code", "");
+                x.nom = m.optString("nom", x.code);
+                x.description = m.optString("description", "");
+                x.prix = m.optLong("prix", 0);
+                x.prixCompte = m.isNull("prix_compte") ? x.prix : m.optLong("prix_compte", x.prix);
+                x.parTelephone = m.optBoolean("par_telephone", false);
+                x.estPack = m.optBoolean("est_pack", false);
+                x.telephones = m.optInt("telephones", 1);
+                JSONArray ct = m.optJSONArray("contenu");
+                if (ct != null) for (int j = 0; j < ct.length(); j++) x.contenu.add(ct.getString(j));
+                e.catalogue.add(x);
+            }
+            JSONArray ab = o.optJSONArray("abonnements");
+            if (ab != null) for (int i = 0; i < ab.length(); i++) {
+                JSONObject a = ab.getJSONObject(i);
+                Modules.Abonnement x = new Modules.Abonnement();
+                x.code = a.optString("code", "");
+                x.fin = a.optLong("fin", 0);
+                x.renouveler = a.optBoolean("renouveler", false);
+                x.essai = a.optBoolean("essai", false);
+                x.essaiUtilise = a.optBoolean("essai_utilise", false);
+                x.offert = a.optBoolean("offert", false);
+                e.abonnements.add(x);
+            }
+            e.solde = o.optLong("solde", 0);
+            e.essaiJours = o.optInt("essai_jours", 14);
+            e.caisses = o.optInt("caisses", 0);
+            e.decalage = o.optLong("decalage", 0);
+            e.connu = true;
+        } catch (Exception ignored) {
+            return new Modules.Etat();
+        }
+        return e;
+    }
+
+    private static void rafraichirModules(Context c, String tok) throws Exception {
+        String r = http("POST", "/rest/v1/rpc/mes_modules", "{}", tok, null).trim();
+        if (!r.startsWith("{")) return;
+        JSONObject o = new JSONObject(r);
+        long serveur = o.optLong("serveur", 0);
+        // Décalage limité à ±2 jours : protège contre une horloge reculée pour prolonger un essai, sans pénaliser un fuseau.
+        o.put("decalage", serveur > 0 ? Math.max(-2L * 86400000, Math.min(2L * 86400000, serveur - System.currentTimeMillis())) : 0);
+        prefs(c).edit().putString("mod_json", o.toString()).putLong("mod_verifie", System.currentTimeMillis()).apply();
+    }
+
+    public static void rafraichirModules(Context ctx) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            rafraichirModules(c, token(c));
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    /** Active une application ou un pack (essai la première fois, sinon un mois payé). Renvoie le message à afficher. */
+    public static String activerModule(Context ctx, String code) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            String tok = token(c);
+            JSONObject body = new JSONObject();
+            body.put("p_code", code);
+            JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/activer_module", body.toString(), tok, null));
+            try { rafraichirModules(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
+            Modules.Module m = modules(c).module(code);
+            String nom = m != null ? m.nom : code;
+            String fin = r.optLong("fin", 0) > 0 ? Modules.date(r.optLong("fin", 0)) : "";
+            switch (r.optString("nature", "")) {
+                case "essai": return nom + " installée : essai gratuit jusqu'au " + fin + ".";
+                case "achat": return nom + " activée jusqu'au " + fin + " (" + Tarif.fcfa(r.optLong("prix", 0)) + " débités).";
+                default: return nom + " : renouvellement automatique réactivé.";
+            }
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    public static void arreterModule(Context ctx, String code) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            String tok = token(c);
+            JSONObject body = new JSONObject();
+            body.put("p_code", code);
+            http("POST", "/rest/v1/rpc/arreter_module", body.toString(), tok, null);
+            rafraichirModules(c, tok);
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    /** Notification (une fois par jour au plus) quand le solde ne couvre pas les renouvellements des 3 prochains jours. */
+    private static void rappelModules(Context c) {
+        long now = System.currentTimeMillis();
+        String msg = modules(c).rappel(now);
+        if (msg == null) return;
+        String jour = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(new java.util.Date(now));
+        if (jour.equals(prefs(c).getString("rappel_modules", ""))) return;
+        prefs(c).edit().putString("rappel_modules", jour).apply();
+        SmsReceiver.notify(c, "Applications", msg);
+    }
+
+    // ---------- Alertes WhatsApp (0.12) ----------
+
+    /** Réglages, destinataires et derniers envois, lus au dernier contact (JSON de mes_alertes, ou null). */
+    public static JSONObject alertesEtat(Context ctx) {
+        try {
+            String raw = prefs(ctx.getApplicationContext()).getString("alertes_json", "");
+            return raw.isEmpty() ? null : new JSONObject(raw);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public static Alertes.Reglages reglagesAlertes(Context ctx) {
+        Alertes.Reglages g = new Alertes.Reglages();
+        JSONObject o = alertesEtat(ctx);
+        JSONObject p = o == null ? null : o.optJSONObject("prefs");
+        if (p == null) return g;
+        g.bilan = p.optBoolean("bilan", true);
+        g.bilanHeure = p.optInt("bilan_heure", 20);
+        g.ecart = p.optBoolean("ecart", true);
+        g.chaine = p.optBoolean("chaine", true);
+        g.solde = p.optBoolean("solde", true);
+        g.dettes = p.optBoolean("dettes", true);
+        g.seuilOm = p.optLong("seuil_om", 5000);
+        g.seuilMomo = p.optLong("seuil_momo", 5000);
+        return g;
+    }
+
+    private static JSONObject rpcObjet(String fonction, JSONObject body, String tok) throws Exception {
+        String r = http("POST", "/rest/v1/rpc/" + fonction, body == null ? "{}" : body.toString(), tok, null).trim();
+        return r.startsWith("{") ? new JSONObject(r) : new JSONObject();
+    }
+
+    public static void rafraichirAlertes(Context ctx) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject o = rpcObjet("mes_alertes", null, token(c));
+            prefs(c).edit().putString("alertes_json", o.toString()).apply();
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    /**
+     * Calcule les alertes de cette caisse et les dépose sur le serveur, puis demande l'envoi des alertes en attente.
+     * Renvoie le nombre d'alertes déposées. forcerBilan : envoi immédiat du bilan du jour (bouton d'essai).
+     */
+    private static int alertes(Context c, String tok, Store st, boolean forcerBilan) throws Exception {
+        if (!modules(c).actif(Modules.ALERTES, System.currentTimeMillis())) return 0;
+        String caisse = caisseId(c);
+        if (caisse.isEmpty()) return 0;
+        JSONObject etat = rpcObjet("mes_alertes", null, tok);
+        prefs(c).edit().putString("alertes_json", etat.toString()).apply();
+        JSONArray dest = etat.optJSONArray("destinataires");
+        boolean unConfirme = false;
+        if (dest != null) for (int i = 0; i < dest.length(); i++) if (dest.getJSONObject(i).optBoolean("confirme", false)) unConfirme = true;
+        if (!unConfirme) return 0;
+
+        long now = System.currentTimeMillis();
+        Caisse.definirPerso(st.categoriesPerso());
+        Analyzer.Result r = Analyzer.analyse(st.all(), Store.config(c), st.lecture(c));
+        long debut = Caisse.debutJour(Caisse.jourDe(now));
+        boolean agOm = Store.prefBool(c, "agent" + Caisse.OM, false), agMomo = Store.prefBool(c, "agent" + Caisse.MOMO, false);
+        Caisse.Bilan b = Caisse.bilan(r, st.classements(), st.regles(), st.saisies(), st.jours(), debut, Alertes.finJour(now), agOm, agMomo);
+        Dettes.Bilan d = modules(c).actif(Modules.DETTES, now) ? Dettes.calculer(st.engagements(), now) : null;
+        String nom = caisseNom(c).isEmpty() ? "Caisse" : caisseNom(c);
+        List<Alertes.Evenement> ev = Alertes.calculer(caisse, nom, r, b, d, reglagesAlertes(c), now, forcerBilan);
+
+        // Déjà déposées depuis ce téléphone (évite des appels inutiles ; le serveur ignore de toute façon les doublons).
+        JSONObject deja = new JSONObject(prefs(c).getString("alertes_deposees", "{}"));
+        int n = 0;
+        for (Alertes.Evenement e : ev) {
+            if (deja.has(e.cle)) continue;
+            JSONObject body = new JSONObject();
+            body.put("p_type", e.type);
+            body.put("p_cle", e.cle);
+            JSONArray p = new JSONArray();
+            for (String x : e.params) p.put(x);
+            body.put("p_params", p);
+            JSONObject res = rpcObjet("signaler_alerte", body, tok);
+            n += res.optInt("deposees", 0);
+            deja.put(e.cle, now);
+        }
+        // On oublie les clés de plus de 3 jours.
+        JSONObject garde = new JSONObject();
+        JSONArray names = deja.names();
+        if (names != null) for (int i = 0; i < names.length(); i++) {
+            String k = names.getString(i);
+            if (now - deja.optLong(k, 0) < 3L * 24 * 3600 * 1000) garde.put(k, deja.optLong(k, 0));
+        }
+        prefs(c).edit().putString("alertes_deposees", garde.toString()).apply();
+        envoyerWhatsapp(c, tok);
+        return n;
+    }
+
+    /** Demande à la fonction « whatsapp » d'envoyer les alertes en attente ; garde la réponse (compte Meta prêt ?). */
+    private static void envoyerWhatsapp(Context c, String tok) {
+        try {
+            String r = http("POST", "/functions/v1/whatsapp", "{\"action\":\"envoyer\"}", tok, null).trim();
+            if (r.startsWith("{")) prefs(c).edit().putBoolean("whatsapp_configure", new JSONObject(r).optBoolean("configure", false)).apply();
+        } catch (Exception ignored) {}
+    }
+
+    public static boolean whatsappConfigure(Context ctx) {
+        return prefs(ctx.getApplicationContext()).getBoolean("whatsapp_configure", false);
+    }
+
+    /** Envoie tout de suite le bilan du jour (essai) ; renvoie le message à afficher. */
+    public static String envoyerBilanMaintenant(Context ctx) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            int n = alertes(c, token(c), Store.get(c), true);
+            if (n == 0) return "Aucun message déposé : vérifiez qu'au moins un numéro est confirmé et que l'application est active.";
+            return whatsappConfigure(c) ? n + " message(s) envoyé(s) sur WhatsApp."
+                    : n + " message(s) en attente : l'envoi WhatsApp sera actif dès que le service client aura terminé sa configuration.";
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Envoi impossible : " + e.getMessage());
+        }
+    }
+
+    /** Demande un code de confirmation par WhatsApp pour un nouveau destinataire. */
+    public static void demanderCode(Context ctx, String numero, String nom) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("action", "code");
+            body.put("numero", numero);
+            body.put("nom", nom);
+            http("POST", "/functions/v1/whatsapp", body.toString(), token(c), null);
+            rafraichirAlertes(c);
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    public static void confirmerDestinataire(Context ctx, String numero, String code) throws CloudException {
+        appelAlertes(ctx, "confirmer_destinataire", "p_numero", numero, "p_code", code);
+    }
+
+    public static void retirerDestinataire(Context ctx, String numero) throws CloudException {
+        appelAlertes(ctx, "retirer_destinataire", "p_numero", numero);
+    }
+
+    public static void reglerAlertes(Context ctx, JSONObject p) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("p", p);
+            http("POST", "/rest/v1/rpc/regler_alertes", body.toString(), token(c), null);
+            rafraichirAlertes(c);
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    private static void appelAlertes(Context ctx, String fonction, String... kv) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            for (int i = 0; i + 1 < kv.length; i += 2) body.put(kv[i], kv[i + 1]);
+            http("POST", "/rest/v1/rpc/" + fonction, body.toString(), token(c), null);
+            rafraichirAlertes(c);
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
+    // ---------- Recharge automatique (0.10) ----------
+
+    /** Recharge payée en attente de son SMS (null si aucune). */
+    public static Recharges.Attente rechargeAttente(Context ctx) {
+        return Recharges.Attente.decode(Store.pref(ctx.getApplicationContext(), "recharge_attente", ""));
+    }
+
+    public static void setRechargeAttente(Context ctx, Recharges.Attente a) {
+        Store.savePref(ctx.getApplicationContext(), "recharge_attente", a == null ? "" : a.encode());
+    }
+
+    private static java.util.Set<String> declarees(Context c) {
+        java.util.Set<String> s = new java.util.HashSet<>();
+        for (String x : Store.pref(c, "recharges_declarees", "").split(",")) if (!x.isEmpty()) s.add(x);
+        return s;
+    }
+
+    public static void marquerDeclaree(Context ctx, String ref) {
+        Context c = ctx.getApplicationContext();
+        String deja = Store.pref(c, "recharges_declarees", "");
+        Store.savePref(c, "recharges_declarees", (deja.isEmpty() ? "" : deja + ",") + ref.toUpperCase(java.util.Locale.ROOT));
+    }
+
+    /**
+     * Déclare seule la recharge en attente dès que le SMS de l'opérateur est lu ; sur le téléphone marchand,
+     * transmet aussi les transferts reçus. Renvoie le message pour l'utilisateur, ou null s'il ne s'est rien passé.
+     */
+    public static String recharges(Context ctx, Analyzer.Result r) {
+        Context c = ctx.getApplicationContext();
+        if (!configured() || !loggedIn(c)) return null;
+        try {
+            return recharges(c, token(c), Store.get(c), r);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String recharges(Context c, String tok, Store st, Analyzer.Result r) throws Exception {
+        Recharges.Attente a = rechargeAttente(c);
+        Portefeuille w = portefeuille(c);
+        if (a != null && a.expiree(System.currentTimeMillis())) { setRechargeAttente(c, null); a = null; }
+        if (a == null && !w.admin) return null;
+        if (r == null) r = Analyzer.analyse(st.all(), Store.config(c), st.lecture(c));
+        String msg = null;
+        if (a != null) {
+            Txn t = Recharges.trouverEnvoi(r.tx, a, declarees(c));
+            if (t != null) {
+                try {
+                    msg = declarerRecharge(c, a.op, t.txnId, a.montant);
+                    marquerDeclaree(c, t.txnId);
+                    setRechargeAttente(c, null);
+                } catch (CloudException e) {
+                    if (e.reseau) throw e;
+                    String m = e.getMessage() == null ? "" : e.getMessage();
+                    if (m.contains("déjà été déclaré")) { marquerDeclaree(c, t.txnId); setRechargeAttente(c, null); }
+                    msg = "Recharge non déclarée : " + m;
+                }
+                Store.savePref(c, "recharge_message", msg);
+                SmsReceiver.notify(c, "Porte-monnaie", msg);
+            }
+        }
+        if (w.admin) {
+            long depuis = prefs(c).getLong("recus_depuis", System.currentTimeMillis() - 7L * 24 * 3600 * 1000);
+            List<Recharges.Recu> recus = Recharges.recusMarchand(r.tx, depuis, Math.max(1, w.rechargeMin));
+            if (!recus.isEmpty()) {
+                JSONArray arr = new JSONArray();
+                long max = depuis;
+                for (Recharges.Recu x : recus) {
+                    JSONObject o = new JSONObject();
+                    o.put("operateur", x.op);
+                    o.put("reference", x.reference);
+                    o.put("montant", x.montant);
+                    o.put("numero", x.numero == null ? "" : x.numero);
+                    o.put("quand", x.date);
+                    arr.put(o);
+                    max = Math.max(max, x.date);
+                }
+                JSONObject body = new JSONObject();
+                body.put("p_recus", arr);
+                http("POST", "/rest/v1/rpc/admin_signaler_recus", body.toString(), tok, null);
+                // Une minute de recouvrement : un SMS arrivé dans la même minute n'est jamais oublié (doublons ignorés).
+                prefs(c).edit().putLong("recus_depuis", max - 60_000L).apply();
+            }
+        }
+        return msg;
+    }
+
     // ---------- Incidents (sans contenu personnel) ----------
 
     private static void envoyerIncidents(Context c, String tok, String userId) {
@@ -864,6 +1263,8 @@ public final class Cloud {
         String raw = text == null ? "" : text;
         try {
             JSONObject o = new JSONObject(raw);
+            // Fonctions Edge de l'application : message déjà rédigé pour l'utilisateur.
+            if (o.has("erreur") && !o.isNull("erreur")) return o.getString("erreur");
             for (String k : new String[] {"msg", "error_description", "message", "error"}) {
                 if (o.has(k) && !o.isNull(k)) { raw = o.getString(k); break; }
             }

@@ -27,7 +27,7 @@ public final class Store extends SQLiteOpenHelper {
     }
 
     private Store(Context ctx) {
-        super(ctx, "carnet.db", null, 8);
+        super(ctx, "carnet.db", null, 9);
     }
 
     @Override
@@ -40,6 +40,7 @@ public final class Store extends SQLiteOpenHelper {
         upgradeTo6(db);
         createFinances(db);
         createCategoriesPerso(db);
+        upgradeTo9(db);
     }
 
     @Override
@@ -52,6 +53,95 @@ public final class Store extends SQLiteOpenHelper {
         if (oldV < 6) upgradeTo6(db);
         if (oldV < 7) createFinances(db);
         if (oldV < 8) createCategoriesPerso(db);
+        if (oldV < 9) upgradeTo9(db);
+    }
+
+    /**
+     * Version 9 (0.10) : suivi de l'argent et dettes / créances.
+     *  - saisie.source : argent qui a payé la dépense (mode SUIVI) ;
+     *  - suivi : opération rattachée à l'argent qui l'a payée (cle = source : source suivie) ;
+     *  - engagement : mouvements de dettes et de créances par personne, communs au compte.
+     */
+    private static void upgradeTo9(SQLiteDatabase db) {
+        db.execSQL("ALTER TABLE saisie ADD COLUMN source TEXT");
+        db.execSQL("CREATE TABLE IF NOT EXISTS suivi (cle TEXT PRIMARY KEY, source TEXT, maj INTEGER)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS engagement (id TEXT PRIMARY KEY, tiers TEXT, numero TEXT, type TEXT, sens INTEGER,"
+                + " montant INTEGER, date INTEGER, echeance INTEGER, motif TEXT, cle TEXT, annule INTEGER DEFAULT 0, maj INTEGER)");
+    }
+
+    // ---------- Suivi de l'argent ----------
+
+    /** Rattachements actifs : cle opération → cle source (cle = source : source suivie). */
+    public Map<String, String> liens() {
+        Map<String, String> m = new HashMap<>();
+        Cursor c = getReadableDatabase().query("suivi", new String[] {"cle", "source"}, "source IS NOT NULL", null, null, null, null);
+        try {
+            while (c.moveToNext()) m.put(c.getString(0), c.getString(1));
+        } finally {
+            c.close();
+        }
+        return m;
+    }
+
+    /** Rattache (ou détache, source null) une opération ; cle = source marque une source suivie. */
+    public void setLien(String cle, String source) {
+        ContentValues v = new ContentValues();
+        v.put("cle", cle);
+        if (source == null) v.putNull("source"); else v.put("source", source);
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("suivi", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    // ---------- Dettes et créances ----------
+
+    public List<Dettes.Engagement> engagements() {
+        List<Dettes.Engagement> out = new ArrayList<>();
+        Cursor c = getReadableDatabase().query("engagement",
+                new String[] {"id", "tiers", "numero", "type", "sens", "montant", "date", "echeance", "motif", "cle", "annule", "maj"},
+                null, null, null, null, "date");
+        try {
+            while (c.moveToNext()) {
+                Dettes.Engagement e = new Dettes.Engagement();
+                e.id = c.getString(0);
+                e.tiers = c.isNull(1) ? null : c.getString(1);
+                e.numero = c.isNull(2) ? null : c.getString(2);
+                e.type = c.isNull(3) ? Dettes.CREANCE : c.getString(3);
+                e.sens = c.isNull(4) ? 1 : c.getInt(4);
+                e.montant = c.isNull(5) ? 0 : c.getLong(5);
+                e.date = c.isNull(6) ? 0 : c.getLong(6);
+                e.echeance = c.isNull(7) ? null : c.getLong(7);
+                e.motif = c.isNull(8) ? "" : c.getString(8);
+                e.cle = c.isNull(9) ? null : c.getString(9);
+                e.annule = !c.isNull(10) && c.getInt(10) != 0;
+                e.maj = c.isNull(11) ? 0 : c.getLong(11);
+                out.add(e);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    public Dettes.Engagement engagement(String id) {
+        for (Dettes.Engagement e : engagements()) if (e.id.equals(id)) return e;
+        return null;
+    }
+
+    public void setEngagement(Dettes.Engagement e) {
+        ContentValues v = new ContentValues();
+        v.put("id", e.id);
+        if (e.tiers == null) v.putNull("tiers"); else v.put("tiers", e.tiers);
+        if (e.numero == null) v.putNull("numero"); else v.put("numero", e.numero);
+        v.put("type", e.type);
+        v.put("sens", e.sens);
+        v.put("montant", e.montant);
+        v.put("date", e.date);
+        if (e.echeance == null) v.putNull("echeance"); else v.put("echeance", e.echeance);
+        v.put("motif", e.motif == null ? "" : e.motif);
+        if (e.cle == null) v.putNull("cle"); else v.put("cle", e.cle);
+        v.put("annule", e.annule ? 1 : 0);
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("engagement", null, v, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
     /** Version 8 : catégories créées par l'utilisateur et catégories fournies masquées (communes au compte). */
@@ -279,7 +369,7 @@ public final class Store extends SQLiteOpenHelper {
     /** Signature des données (nombre et dernière modification) : sert à savoir si les résumés sont à recalculer. */
     public String signature() {
         StringBuilder b = new StringBuilder();
-        for (String t : new String[] {"sms", "classement", "regle", "saisie", "jour", "budget", "avoir", "categorie_perso"}) {
+        for (String t : new String[] {"sms", "classement", "regle", "saisie", "jour", "budget", "avoir", "categorie_perso", "suivi", "engagement"}) {
             Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*), MAX(maj) FROM " + t, null);
             try {
                 if (c.moveToFirst()) b.append(c.getLong(0)).append(':').append(c.isNull(1) ? 0 : c.getLong(1)).append('|');
@@ -363,10 +453,13 @@ public final class Store extends SQLiteOpenHelper {
 
     // ---------- Mouvements d'espèces ----------
 
+    /** Enregistre un mouvement ; renseigne s.uid. */
     public long addSaisie(Caisse.Saisie s) {
         long now = System.currentTimeMillis();
         ContentValues v = new ContentValues();
-        v.put("uid", UUID.randomUUID().toString().replace("-", ""));
+        if (s.uid == null || s.uid.isEmpty()) s.uid = UUID.randomUUID().toString().replace("-", "");
+        v.put("uid", s.uid);
+        if (s.source == null) v.putNull("source"); else v.put("source", s.source);
         v.put("date", s.date);
         v.put("mode", s.mode);
         v.put("sens", (long) s.sens);
@@ -388,7 +481,7 @@ public final class Store extends SQLiteOpenHelper {
 
     public List<Caisse.Saisie> saisies() {
         List<Caisse.Saisie> out = new ArrayList<>();
-        Cursor c = getReadableDatabase().query("saisie", new String[] {"id", "date", "mode", "sens", "montant", "libelle", "ref", "annule", "depuis_sms", "categorie"},
+        Cursor c = getReadableDatabase().query("saisie", new String[] {"id", "date", "mode", "sens", "montant", "libelle", "ref", "annule", "depuis_sms", "categorie", "uid", "source"},
                 null, null, null, null, "date ASC");
         try {
             while (c.moveToNext()) {
@@ -403,6 +496,8 @@ public final class Store extends SQLiteOpenHelper {
                 s.annule = c.getInt(7) == 1;
                 s.depuisSms = c.getInt(8) == 1;
                 s.categorie = c.isNull(9) ? null : c.getString(9);
+                s.uid = c.isNull(10) ? null : c.getString(10);
+                s.source = c.isNull(11) ? null : c.getString(11);
                 out.add(s);
             }
         } finally {
@@ -534,11 +629,14 @@ public final class Store extends SQLiteOpenHelper {
             new Spec("sms", "hash", true, "hash", "address", "body", "date:n", "sub", "maj:n"),
             new Spec("classement", "cle", false, "cle", "categorie", "motif", "maj:n"),
             new Spec("regle", "numero", false, "numero", "categorie", "maj:n"),
-            new Spec("saisie", "uid", false, "uid", "date:n", "mode", "sens:n", "montant:n", "libelle", "ref", "annule:n", "depuis_sms:n", "cree:n", "categorie", "maj:n"),
+            new Spec("saisie", "uid", false, "uid", "date:n", "mode", "sens:n", "montant:n", "libelle", "ref", "annule:n", "depuis_sms:n", "cree:n", "categorie", "source", "maj:n"),
             new Spec("jour", "jour", false, "jour", "fond:n", "compte:n", "note", "cloture_at:n", "maj:n"),
             new Spec("budget", "poste", false, "poste", "montant:n", "maj:n"),
             new Spec("avoir", "id", false, "id", "nom", "montant:n", "maj:n"),
             new Spec("categorie_perso", "code", false, "code", "nom", "sens:n", "masquee:n", "maj:n"),
+            new Spec("suivi", "cle", false, "cle", "source", "maj:n"),
+            new Spec("engagement", "id", false, "id", "tiers", "numero", "type", "sens:n", "montant:n", "date:n", "echeance:n", "motif", "cle",
+                    "annule:n", "maj:n"),
     };
 
     /** Lignes modifiées après "since", par ordre de modification. Valeurs : String, Long ou null. */

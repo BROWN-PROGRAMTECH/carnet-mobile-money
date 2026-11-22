@@ -19,13 +19,24 @@ public final class Caisse {
     private Caisse() {}
 
     public static final String OM = "OM", MOMO = "MOMO", ESPECES = "ESPECES";
+    /**
+     * Mode d'une dépense payée avec un argent suivi (retrait, salaire…), hors caisse espèces (version 0.10).
+     * Sa source est la clé de l'opération qui a apporté cet argent.
+     */
+    public static final String SUIVI = "SUIVI";
+    /** Catégorie calculée d'une sortie entièrement répartie en dépenses : jamais enregistrée. */
+    public static final String REPARTI = "REPARTI";
 
     // ---------- Catégories ----------
 
     // Entrées uniquement
     public static final String VENTE = "VENTE", APPORT = "APPORT", PRET_RECU = "PRET_RECU";
+    /** Une personne me rembourse ce que je lui avais prêté (créance). Version 0.10. */
+    public static final String REMB_RECU = "REMB_RECU";
     // Sorties uniquement
     public static final String ACHAT = "ACHAT", CHARGE = "CHARGE", RETRAIT_PERSO = "RETRAIT_PERSO", REMB_PRET = "REMB_PRET";
+    /** Je prête de l'argent à quelqu'un (créance). Version 0.10. */
+    public static final String PRET_ACCORDE = "PRET_ACCORDE";
     /** Postes de charges (v0.9). CHARGE seul = « Autre charge » (et les charges classées avant la v0.9). */
     public static final String CHARGE_LOYER = "CHARGE_LOYER", CHARGE_SALAIRE = "CHARGE_SALAIRE", CHARGE_TRANSPORT = "CHARGE_TRANSPORT",
             CHARGE_ENERGIE = "CHARGE_ENERGIE", CHARGE_TELECOM = "CHARGE_TELECOM", CHARGE_TAXES = "CHARGE_TAXES";
@@ -116,12 +127,12 @@ public final class Caisse {
     public static final String PAIEMENT = "PAIEMENT", PERSONNEL = "PERSONNEL";
 
     /** Toutes les catégories proposées, dans l'ordre des totaux et de l'export. */
-    public static final String[] CATEGORIES = {VENTE, APPORT, PRET_RECU, ACHAT, CHARGE_LOYER, CHARGE_SALAIRE, CHARGE_TRANSPORT, CHARGE_ENERGIE,
-            CHARGE_TELECOM, CHARGE_TAXES, CHARGE, RETRAIT_PERSO, REMB_PRET, DON, TRANSFERT, AUTRE};
+    public static final String[] CATEGORIES = {VENTE, APPORT, PRET_RECU, REMB_RECU, ACHAT, CHARGE_LOYER, CHARGE_SALAIRE, CHARGE_TRANSPORT, CHARGE_ENERGIE,
+            CHARGE_TELECOM, CHARGE_TAXES, CHARGE, RETRAIT_PERSO, PRET_ACCORDE, REMB_PRET, DON, TRANSFERT, AUTRE};
     /** Catégories proposées sur une entrée, puis sur une sortie. */
-    public static final String[] ENTREES = {VENTE, APPORT, PRET_RECU, DON, TRANSFERT, AUTRE};
+    public static final String[] ENTREES = {VENTE, APPORT, PRET_RECU, REMB_RECU, DON, TRANSFERT, AUTRE};
     public static final String[] SORTIES = {ACHAT, CHARGE_LOYER, CHARGE_SALAIRE, CHARGE_TRANSPORT, CHARGE_ENERGIE, CHARGE_TELECOM, CHARGE_TAXES, CHARGE,
-            RETRAIT_PERSO, REMB_PRET, DON, TRANSFERT, AUTRE};
+            RETRAIT_PERSO, PRET_ACCORDE, REMB_PRET, DON, TRANSFERT, AUTRE};
     /** Regroupement affiché dans le choix de catégorie. */
     public static final String[] SORTIES_PRINCIPALES = {ACHAT, RETRAIT_PERSO, REMB_PRET};
     public static final String[] LES_DEUX = {DON, TRANSFERT, AUTRE};
@@ -140,8 +151,8 @@ public final class Caisse {
             return p == null ? 0 : p.sens;
         }
         switch (c) {
-            case VENTE: case APPORT: case PRET_RECU: return 1;
-            case ACHAT: case RETRAIT_PERSO: case REMB_PRET: return -1;
+            case VENTE: case APPORT: case PRET_RECU: case REMB_RECU: return 1;
+            case ACHAT: case RETRAIT_PERSO: case REMB_PRET: case PRET_ACCORDE: return -1;
             default: return 0;
         }
     }
@@ -188,7 +199,10 @@ public final class Caisse {
         switch (c) {
             case VENTE: return "Vente";
             case APPORT: return "Apport personnel";
-            case PRET_RECU: return "Prêt reçu";
+            case PRET_RECU: return "Emprunt (je dois)";
+            case REMB_RECU: return "Remboursement reçu";
+            case PRET_ACCORDE: return "Prêt accordé (on me doit)";
+            case REPARTI: return "Réparti";
             case ACHAT: return "Achat / fournisseur";
             case CHARGE: return "Autre charge";
             case CHARGE_LOYER: return "Loyer";
@@ -198,7 +212,7 @@ public final class Caisse {
             case CHARGE_TELECOM: return "Téléphone / internet";
             case CHARGE_TAXES: return "Impôts et taxes";
             case RETRAIT_PERSO: return "Retrait personnel";
-            case REMB_PRET: return "Remboursement de prêt";
+            case REMB_PRET: return "Remboursement de dette";
             case DON: return "Don";
             case TRANSFERT: return "Transfert entre mes comptes";
             case AGENT: return "Opération client (agent)";
@@ -217,7 +231,10 @@ public final class Caisse {
         switch (c) {
             case VENTE: return "Vente";
             case APPORT: return "Apport perso";
-            case PRET_RECU: return "Prêt reçu";
+            case PRET_RECU: return "Emprunt";
+            case REMB_RECU: return "Remb. reçu";
+            case PRET_ACCORDE: return "Prêt accordé";
+            case REPARTI: return "Réparti";
             case ACHAT: return "Achat";
             case CHARGE: return "Autre charge";
             case CHARGE_LOYER: return "Loyer";
@@ -227,7 +244,7 @@ public final class Caisse {
             case CHARGE_TELECOM: return "Téléphone";
             case CHARGE_TAXES: return "Taxes";
             case RETRAIT_PERSO: return "Retrait perso";
-            case REMB_PRET: return "Remb. prêt";
+            case REMB_PRET: return "Remb. dette";
             case DON: return "Don";
             case TRANSFERT: return "Transfert";
             default: return "Autre";
@@ -256,7 +273,10 @@ public final class Caisse {
         switch (c) {
             case VENTE: return "Argent reçu d'un client. Compte dans le résultat (+).";
             case APPORT: return "Argent personnel mis dans l'activité. Hors résultat.";
-            case PRET_RECU: return "Argent prêté par quelqu'un, à rembourser. Hors résultat.";
+            case PRET_RECU: return "Quelqu'un vous prête de l'argent : vous le lui devez. Hors résultat.";
+            case REMB_RECU: return "Quelqu'un vous rend l'argent que vous lui aviez prêté. Hors résultat.";
+            case PRET_ACCORDE: return "Vous prêtez de l'argent : la personne vous le doit. Hors résultat.";
+            case REPARTI: return "Sortie répartie entre plusieurs dépenses.";
             case ACHAT: return "Marchandise ou fournisseur. Compte dans le résultat (−).";
             case CHARGE: return "Autre dépense de fonctionnement. Compte dans le résultat (−).";
             case CHARGE_LOYER: return "Loyer de la boutique ou du local. Compte dans le résultat (−).";
@@ -266,7 +286,7 @@ public final class Caisse {
             case CHARGE_TELECOM: return "Crédit, forfaits internet, téléphone de la boutique. Compte dans le résultat (−).";
             case CHARGE_TAXES: return "Impôts, patente, taxes communales. Compte dans le résultat (−).";
             case RETRAIT_PERSO: return "Argent pris pour vous ou votre famille. Hors résultat.";
-            case REMB_PRET: return "Remboursement d'un prêt. Hors résultat.";
+            case REMB_PRET: return "Vous remboursez quelqu'un qui vous avait prêté. Hors résultat.";
             case DON: return "Don reçu ou donné. Hors résultat.";
             case TRANSFERT: return "Argent déplacé entre vos propres comptes (OM, MoMo, espèces). Hors résultat.";
             case AGENT: return "Dépôt ou retrait d'un client sur votre compte agent. Hors résultat.";
@@ -305,6 +325,13 @@ public final class Caisse {
         public String motif;
         /** true si la catégorie vient d'une règle « toujours classer ce contact ainsi » ou du mode agent. */
         public boolean auto;
+        /** Part de cette sortie répartie en dépenses (centimes) ; le reste garde la catégorie de la ligne. */
+        public long reparti;
+
+        /** Reste à justifier d'une sortie répartie sans catégorie pour le reste. */
+        public long reste() {
+            return sms == null ? 0 : Math.max(0, sms.montant - reparti);
+        }
     }
 
     // ---------- Espèces (saisie manuelle) ----------
@@ -317,6 +344,8 @@ public final class Caisse {
         public int sens = 1;
         public String libelle = "", ref = "", categorie;
         public boolean annule, depuisSms;
+        /** Identifiant universel ; source : clé de l'argent qui a payé cette dépense (mode SUIVI), ou null. */
+        public String uid, source;
     }
 
     /** Une journée de caisse espèces : fond à l'ouverture, comptage à la clôture. */
@@ -360,6 +389,8 @@ public final class Caisse {
         public final Map<Txn, Ligne> parSms = new IdentityHashMap<>();
         /** Mouvements d'espèces de la période, du plus récent au plus ancien. */
         public final List<Saisie> mouvementsEspeces = new ArrayList<>();
+        /** Dépenses payées avec un argent suivi (mode SUIVI), du plus récent au plus ancien. */
+        public final List<Saisie> depensesSuivies = new ArrayList<>();
         /** Totaux par catégorie ; la clé null regroupe ce qui reste à classer. */
         public final Map<String, Total> totaux = new LinkedHashMap<>();
         public long frais;
@@ -424,6 +455,12 @@ public final class Caisse {
             c.agent = OM.equals(op) ? agentOm : MOMO.equals(op) && agentMomo;
             comptes.put(op, c);
         }
+        // Parts réparties de chaque sortie (dépenses SUIVI dont la source est cette opération), toutes dates confondues.
+        Map<String, Long> parts = new java.util.HashMap<>();
+        for (Saisie s : saisies) {
+            if (s.annule || !SUIVI.equals(s.mode) || s.source == null) continue;
+            parts.put(s.source, parts.getOrDefault(s.source, 0L) + s.montant);
+        }
         for (Txn t : r.tx) {
             if (t.isBalanceCheck() || t.date < from || t.date > to) continue;
             boolean agent = OM.equals(t.op) ? agentOm : MOMO.equals(t.op) && agentMomo;
@@ -436,9 +473,11 @@ public final class Caisse {
             else if (agent && effetEspecesAgent(t) != 0) { l.categorie = AGENT; l.auto = true; }
             else if ((parRegle = regle(regles, t.numero, t.sens)) != null) { l.categorie = parRegle; l.auto = true; }
             l.motif = c != null && c.motif != null ? c.motif : (t.motif != null ? t.motif : "");
+            if (t.sens < 0) l.reparti = Math.min(t.montant, parts.getOrDefault(cle(t), 0L));
+            if (l.reparti > 0 && l.reparti >= t.montant && l.categorie == null) l.categorie = REPARTI;
             b.lignes.add(l);
             b.parSms.put(t, l);
-            add(b, l.categorie, t.sens, t.montant);
+            if (t.montant - l.reparti > 0 || l.reparti == 0) add(b, REPARTI.equals(l.categorie) ? null : l.categorie, t.sens, t.montant - l.reparti);
             b.frais += t.frais;
             if (l.categorie == null) {
                 b.aClasser.add(l);
@@ -470,6 +509,12 @@ public final class Caisse {
             if (!s.annule) add(b, normaliserSaisie(s.categorie, s.sens), s.sens, s.montant);
         }
         b.mouvementsEspeces.sort((x, y) -> Long.compare(y.date, x.date));
+        for (Saisie s : saisies) {
+            if (!SUIVI.equals(s.mode) || s.date < from || s.date > to) continue;
+            b.depensesSuivies.add(s);
+            if (!s.annule) add(b, normaliserSaisie(s.categorie, s.sens), s.sens, s.montant);
+        }
+        b.depensesSuivies.sort((x, y) -> Long.compare(y.date, x.date));
 
         Especes e = b.especes;
         List<Jour> tri = new ArrayList<>(jours);

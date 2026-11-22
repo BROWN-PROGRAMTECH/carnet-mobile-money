@@ -85,14 +85,12 @@ public class MainActivity extends Activity {
     private int period = 0, pageIdx = PAGE_CAISSE, liste = LISTE_JOURNAL;
     private long customFrom, customTo;
     private boolean loading, rechargeOuverte, avanceOuvert, uiPrete, rechargeManuel;
-    /** Recharge : 0 = instructions de paiement, 1 = déclaration (ID retrouvé dans les SMS). */
-    private int rechargeEtape;
     private String rechargeOp = "OM";
     private final java.util.Set<String> comptesOuverts = new java.util.HashSet<>();
     private final Runnable hideNotice = () -> noticeText.setVisibility(View.GONE);
 
     // Champs de saisie conservés d'un affichage à l'autre (sinon un nouveau SMS effacerait la saisie en cours).
-    private EditText rechargeMontant, rechargeRef, phoneField, secretField, ownerField, omField, momoField, banquesField;
+    private EditText rechargeMontant, rechargeMontantManuel, rechargeRef, phoneField, secretField, ownerField, omField, momoField, banquesField;
     private CheckBox agentOmBox, agentMomoBox, autoBox;
 
     // Export en cours : figé au moment de la confirmation.
@@ -116,6 +114,17 @@ public class MainActivity extends Activity {
     private List<Caisse.Saisie> saisies = new ArrayList<>();
     private List<Caisse.Jour> jours = new ArrayList<>();
     private Caisse.Bilan bilan;
+    /** Suivi de l'argent (cle opération → cle source) et dettes / créances. */
+    private Map<String, String> liens = new HashMap<>();
+    private List<Dettes.Engagement> engagements = new ArrayList<>();
+    /** Écrans de détail de l'onglet Finances (null = fermé) ; personneOuverte "" = liste de toutes les personnes. */
+    private String suiviOuvert, personneOuverte, categorieOuverte;
+    /** Applications (0.11) : état en mémoire, écran du catalogue, choix à l'inscription. */
+    private Modules.Etat etatModules;
+    private boolean applicationsOuvert, choixModules, alertesChargees;
+    private int profilChoisi = -1;
+    private final java.util.Set<String> cochees = new java.util.LinkedHashSet<>();
+    private int categorieSens = 1;
 
 
     private final BroadcastReceiver onNewSms = new BroadcastReceiver() {
@@ -184,6 +193,12 @@ public class MainActivity extends Activity {
         else registerReceiver(onNewSms, f);
         refreshPermissionState();
         autoSync();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (uiPrete && fermerDetail()) { render(); return; }
+        super.onBackPressed();
     }
 
     @Override
@@ -292,6 +307,11 @@ public class MainActivity extends Activity {
                     if (added > 0) r = analyseStored(store, Store.config(this));
                 }
                 Store.savePref(this, "nonReconnus", String.valueOf(r.unknown.size()));
+                // Recharge payée : l'ID du SMS de l'opérateur est déclaré tout seul.
+                if (Cloud.rechargeAttente(this) != null) {
+                    final String rm = Cloud.recharges(this, r);
+                    if (rm != null) runOnUiThread(() -> notice(rm, rm.startsWith("Recharge non") ? 2 : 1));
+                }
                 msg = r.tx.size() + " opérations" + (added > 0 ? " · " + added + " nouveau(x) SMS" : " · à jour");
                 if (r.scanned == 0 && !hasSmsPermission()) msg = "Autorisez la lecture des SMS pour commencer.";
             } catch (Exception e) {
@@ -330,10 +350,17 @@ public class MainActivity extends Activity {
         Map<String, String> rg = store.regles();
         List<Caisse.Saisie> s = store.saisies();
         List<Caisse.Jour> j = store.jours();
+        Modules.Etat em = Cloud.modules(this);
+        Map<String, String> li = store.liens();
+        List<Dettes.Engagement> en = store.engagements();
         classements = cl;
         regles = rg;
         saisies = s;
         jours = j;
+        liens = li;
+        engagements = en;
+        etatModules = em;
+        if (Cloud.configured() && Cloud.loggedIn(this) && em.aChoisir() && Store.pref(this, "choix_modules_fait", "").isEmpty()) choixModules = true;
     }
 
     /** Oublie la position de lecture : la prochaine actualisation relira toute la messagerie (une fois). */
@@ -524,7 +551,8 @@ public class MainActivity extends Activity {
             case Caisse.VENTE: return GOOD;
             case Caisse.ACHAT: return INK;
             case Caisse.APPORT: case Caisse.RETRAIT_PERSO: return WARN;
-            case Caisse.PRET_RECU: case Caisse.REMB_PRET: return OM;
+            case Caisse.PRET_RECU: case Caisse.REMB_PRET: case Caisse.PRET_ACCORDE: case Caisse.REMB_RECU: return OM;
+            case Caisse.REPARTI: return PURPLE;
             case Caisse.DON: return PURPLE;
             case Caisse.TRANSFERT: case Caisse.AGENT: return CASH;
             default: return Caisse.estCharge(c) ? INK : MUTED;
@@ -542,6 +570,11 @@ public class MainActivity extends Activity {
      * Si le mot cherché n'existe pas, « + Créer » ouvre la création directe. Met à jour choix[0] et le texte d'aide.
      */
     private void categorieGrid(LinearLayout grille, TextView aide, int sens, String[] choix) {
+        categorieGrid(grille, aide, sens, choix, null);
+    }
+
+    /** Même sélecteur ; surChange est appelé à chaque changement de catégorie (champ « Personne » d'un prêt…). */
+    private void categorieGrid(LinearLayout grille, TextView aide, int sens, String[] choix, Runnable surChange) {
         grille.removeAllViews();
         EditText recherche = new EditText(this);
         recherche.setSingleLine(true);
@@ -557,6 +590,7 @@ public class MainActivity extends Activity {
         remplir[0] = () -> {
             liste.removeAllViews();
             aide.setText(Caisse.aide(choix[0]));
+            if (surChange != null) surChange.run();
             String q = normNom(recherche.getText().toString());
             List<String> dispo = Caisse.choix(sens);
             if (choix[0] != null && !dispo.contains(choix[0]) && !Caisse.AGENT.equals(choix[0])) dispo.add(0, choix[0]);
@@ -594,9 +628,11 @@ public class MainActivity extends Activity {
             }
             List<String[]> sections = new ArrayList<>();
             if (sens > 0) {
-                sections.add(new String[] {"Entrées", Caisse.VENTE, Caisse.APPORT, Caisse.PRET_RECU});
+                sections.add(new String[] {"Entrées", Caisse.VENTE, Caisse.APPORT});
+                sections.add(new String[] {"Dettes et créances", Caisse.REMB_RECU, Caisse.PRET_RECU});
             } else {
-                sections.add(new String[] {"Sorties", Caisse.ACHAT, Caisse.RETRAIT_PERSO, Caisse.REMB_PRET});
+                sections.add(new String[] {"Sorties", Caisse.ACHAT, Caisse.RETRAIT_PERSO});
+                sections.add(new String[] {"Dettes et créances", Caisse.PRET_ACCORDE, Caisse.REMB_PRET});
                 List<String> ch = new ArrayList<>();
                 ch.add("Charges");
                 for (String c : dispo) if (Caisse.estCharge(c)) ch.add(c);
@@ -649,7 +685,7 @@ public class MainActivity extends Activity {
     private List<String> frequentes(int sens) {
         Map<String, Integer> n = new HashMap<>();
         if (bilan != null) for (Caisse.Ligne l : bilan.lignes) {
-            if (l.auto || l.categorie == null || l.sms == null || Caisse.AGENT.equals(l.categorie)) continue;
+            if (l.auto || l.categorie == null || l.sms == null || Caisse.AGENT.equals(l.categorie) || Caisse.REPARTI.equals(l.categorie)) continue;
             if ((l.sms.sens > 0) != (sens > 0)) continue;
             n.put(l.categorie, n.getOrDefault(l.categorie, 0) + 1);
         }
@@ -1013,6 +1049,7 @@ public class MainActivity extends Activity {
     }
 
     private void showPage(int p) {
+        fermerDetail();
         pageIdx = p;
         render();
         scroll.scrollTo(0, 0);
@@ -1093,11 +1130,17 @@ public class MainActivity extends Activity {
         classerBadge.setText(ac > 99 ? "99+" : String.valueOf(ac));
         classerBadge.setVisibility(ac > 0 ? View.VISIBLE : View.GONE);
 
+        if (choixModules) { choixModulesPage(); return; }
         switch (pageIdx) {
             case PAGE_CLASSER: classerPage(); break;
             case PAGE_EXPORT: exportPage(); break;
-            case PAGE_COMPTE: comptePage(); break;
-            case PAGE_FINANCES: financesPage(); break;
+            case PAGE_COMPTE: if (applicationsOuvert) applicationsPage(); else comptePage(); break;
+            case PAGE_FINANCES:
+                if (suiviOuvert != null) suiviPage();
+                else if (personneOuverte != null) personnePage();
+                else if (categorieOuverte != null) categoriePage();
+                else financesPage();
+                break;
             default: caissePage(range);
         }
     }
@@ -1173,6 +1216,8 @@ public class MainActivity extends Activity {
             page.addView(empty("Ouverture de votre caisse…"));
             return;
         }
+        View bm = bandeauModules();
+        if (bm != null) page.addView(bm, fill());
         page.addView(heroCard(bilan), fill());
 
         if (!bilan.comptes.isEmpty()) {
@@ -1212,6 +1257,10 @@ public class MainActivity extends Activity {
                 for (Caisse.Ligne l : bilan.lignes) {
                     if (n++ >= MAX_ROWS) { list.addView(empty("Seules les " + MAX_ROWS + " dernières opérations sont affichées. L'export Excel contient tout.")); break; }
                     list.addView(ligneRow(l, false), fill());
+                }
+                if (!bilan.depensesSuivies.isEmpty()) {
+                    list.addView(label("Dépenses payées avec un argent suivi"));
+                    for (Caisse.Saisie s : bilan.depensesSuivies) if (!s.annule) list.addView(depenseSuivieRow(s), fill());
                 }
             }
         }
@@ -1315,6 +1364,8 @@ public class MainActivity extends Activity {
     }
 
     private View especesCard(Caisse.Especes e) {
+        if (acces(Modules.CAISSE) == Modules.Acces.ABSENT)
+            return promoModule(Modules.CAISSE, "Comptez vos espèces : fond de caisse, entrées et sorties en espèces, clôture avec écart réel / théorique, mode agent OM et MoMo.");
         LinearLayout card = card();
         LinearLayout head = new LinearLayout(this);
         head.setGravity(Gravity.CENTER_VERTICAL);
@@ -1344,7 +1395,7 @@ public class MainActivity extends Activity {
         actions.addView(small("Fond de caisse", INK, v -> openFond()), weight(false));
         actions.addView(small("+ / − espèces", INK, v -> openEspeces()), weight(false));
         actions.addView(small("Clôturer", ACCENT, v -> openCloture()), weight(true));
-        card.addView(actions, fill());
+        if (actif(Modules.CAISSE)) card.addView(actions, fill()); else card.addView(bandeauLecture(Modules.CAISSE), fill());
         return card;
     }
 
@@ -1791,6 +1842,15 @@ public class MainActivity extends Activity {
         if (result == null) { page.addView(empty("Ouverture de vos finances…")); return; }
 
         Caisse.Bilan b = computeBilan(debut, fin);
+        if (acces(Modules.FINANCES) == Modules.Acces.ABSENT) {
+            // Base gratuite : entrées et dépenses par catégorie ; le reste est proposé.
+            page.addView(entreesSortiesCard(b), fill());
+            ajouterSuiviEtDettes(null);
+            page.addView(promoModule(Modules.FINANCES, "Trésorerie de tous vos comptes, résultat du mois comparé au mois précédent, budgets par poste avec alertes, "
+                    + "ventes par moyen de paiement, meilleurs clients. Export Excel inclus."), fill());
+            return;
+        }
+        if (!actif(Modules.FINANCES)) page.addView(bandeauLecture(Modules.FINANCES), fill());
         Finances.Mois m = Finances.mois(b);
         long debutPrec = Finances.debutMois(now, moisDecalage - 1);
         long finPrec = enCours ? Finances.memeMomentMoisPrecedent(debut, now) : debut - 1;
@@ -1840,6 +1900,10 @@ public class MainActivity extends Activity {
             mc.addView(w, fill());
         }
         page.addView(mc, fill());
+
+        // Entrées et sorties par catégorie, suivi de l'argent, dettes et créances (0.10).
+        page.addView(entreesSortiesCard(b), fill());
+        ajouterSuiviEtDettes(tr);
 
         // Dépenses par poste et budgets.
         LinearLayout dc = card();
@@ -2004,6 +2068,7 @@ public class MainActivity extends Activity {
     }
 
     private void enregistrerBudgets() {
+        if (!exiger(Modules.FINANCES)) return;
         final Map<String, Long> valeurs = new HashMap<>();
         for (String poste : Caisse.POSTES_DEPENSE) {
             EditText f = budgetFields.get(poste);
@@ -2026,6 +2091,7 @@ public class MainActivity extends Activity {
 
     /** Ajoute (p == null) ou modifie un avoir saisi à la main. */
     private void ouvrirAvoir(Finances.Poste p) {
+        if (!exiger(Modules.FINANCES)) return;
         LinearLayout form = column(10);
         form.setPadding(dp(20), dp(8), dp(20), 0);
         EditText nom = new EditText(this);
@@ -2104,6 +2170,7 @@ public class MainActivity extends Activity {
     private static int nbOperations(Caisse.Bilan b) {
         int n = b.lignes.size();
         for (Caisse.Saisie s : b.mouvementsEspeces) if (!s.annule) n++;
+        for (Caisse.Saisie s : b.depensesSuivies) if (!s.annule) n++;
         return n;
     }
 
@@ -2158,9 +2225,11 @@ public class MainActivity extends Activity {
         } else {
             Tarif.Decision d = w.decider(nb);
             priceBox.addView(label("Prix de cet export"));
-            TextView price = text(d.offert ? "Offert" : d.prix == 0 ? "Gratuit" : Tarif.fcfa(d.prix), 22, d.offert ? GOOD : INK, true);
+            TextView price = text(d.inclus ? "Inclus" : d.offert ? "Offert" : d.prix == 0 ? "Gratuit" : Tarif.fcfa(d.prix), 22, d.offert || d.inclus ? GOOD : INK, true);
             priceBox.addView(price);
-            if (d.offert) priceBox.addView(text("Votre premier export est offert (au lieu de " + Tarif.fcfa(d.prixNormal) + ").", 13, MUTED, false));
+            if (d.inclus) priceBox.addView(text("Export inclus avec votre application Finances & budgets.", 13, MUTED, false));
+            else if (d.offert) priceBox.addView(text("Votre premier export est offert (au lieu de " + Tarif.fcfa(d.prixNormal) + ").", 13, MUTED, false));
+            else if (d.prix > 0 && Cloud.loggedIn(this)) priceBox.addView(small("Exports illimités avec Finances & budgets  ›", ACCENT, v -> proposerModule(Modules.FINANCES)));
             else if (d.prix > 0 && d.possible) priceBox.addView(text("Solde après l'export : " + Tarif.fcfa(d.soldeApres), 13, MUTED, false));
             else if (!d.possible) priceBox.addView(text("Il manque " + Tarif.fcfa(d.manque) + " sur votre porte-monnaie.", 13, BAD, true));
             go = d.possible
@@ -2204,7 +2273,7 @@ public class MainActivity extends Activity {
         actions.addView(button(rechargeOuverte ? "Fermer" : "Recharger", !rechargeOuverte, v -> { rechargeOuverte = !rechargeOuverte; render(); }), weight(false));
         actions.addView(button("Actualiser", false, v -> actualiserPortefeuille()), weight(true));
         card.addView(actions, fill());
-        if (rechargeOuverte) rechargeForm(card, w);
+        if (rechargeOuverte || Cloud.rechargeAttente(this) != null) rechargeForm(card, w);
         return card;
     }
 
@@ -2225,31 +2294,44 @@ public class MainActivity extends Activity {
         boolean om = "OM".equals(rechargeOp);
         String numero = om ? w.numeroOm : w.numeroMomo;
 
-        if (rechargeEtape == 0) {
-            // Étape 1 : payer. Aucun ID à saisir ici.
-            card.addView(label("Étape 1 sur 2 · Payer"));
+        Recharges.Attente a = Cloud.rechargeAttente(this);
+        if (a != null) {
+            rechargeEnCours(card, w, a);
+        } else {
+            // 1. Opérateur  2. Montant  3. Payer : le menu de l'opérateur s'ouvre, l'ID sera relevé tout seul.
+            card.addView(label("Recharger en un geste"));
             if (!w.numeroOm.isEmpty() && !w.numeroMomo.isEmpty()) {
                 card.addView(segmented(new String[] {"Orange Money", "MTN MoMo"}, om ? 0 : 1, k -> { rechargeOp = k == 0 ? "OM" : "MOMO"; render(); }), fill());
             }
-            card.addView(text("Envoyez le montant de votre choix par transfert " + (om ? "Orange Money" : "MTN MoMo") + " au", 14, INK, false));
-            TextView num = text(formatNumero(numero), 22, om ? OM : MOMO, true);
-            num.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-            num.setTextIsSelectable(true);
-            card.addView(num);
-            if (!w.marchand.isEmpty()) card.addView(text("Le nom affiché par l'opérateur sera : " + w.marchand, 13, MUTED, false));
-            card.addView(text("Minimum " + Tarif.fcfa(w.rechargeMin) + ". Exemple : 5 000 FCFA = 10 exports de 200 opérations au plus.", 12, MUTED, false));
-            card.addView(button("J'ai envoyé l'argent", true, v -> {
-                rechargeEtape = 1;
-                reload(true); // lit tout de suite le SMS de confirmation de l'opérateur
-            }), fill());
-            return;
+            if (rechargeMontant == null) {
+                rechargeMontant = amountField("Montant, en FCFA");
+                rechargeMontant.setInputType(InputType.TYPE_CLASS_NUMBER);
+            }
+            card.addView(detach(rechargeMontant), fill());
+            LinearLayout vite = new LinearLayout(this);
+            for (long m : new long[] {1000, 2000, 5000, 10000}) {
+                if (m < w.rechargeMin) continue;
+                vite.addView(small(SmsParser.fmt(m * 100), INK, v -> rechargeMontant.setText(String.valueOf(m))), weight(m == 10000));
+            }
+            card.addView(vite, fill());
+            card.addView(text("Le paiement va au " + formatNumero(numero) + (w.marchand.isEmpty() ? "" : " (" + w.marchand + ")")
+                    + ". Minimum " + Tarif.fcfa(w.rechargeMin) + " · exemple : 5 000 FCFA = 10 exports de 200 opérations au plus.", 12, MUTED, false));
+            Button payer = button("Payer avec " + (om ? "Orange Money" : "MTN MoMo"), true, v -> payerRecharge(w));
+            payer.setMinHeight(dp(52));
+            card.addView(payer, fill());
+            card.addView(text(Recharges.codeComplet(om ? w.ussdOm : w.ussdMomo)
+                    ? "Le menu s'ouvre avec le numéro et le montant : confirmez avec votre code secret."
+                    : "Le menu " + (om ? "Orange Money" : "MoMo") + " s'ouvre : faites un transfert vers ce numéro, de ce montant, et validez avec votre code secret. "
+                      + "L'application ne voit jamais votre code.", 12, MUTED, false));
         }
 
-        // Étape 2 : déclarer, de préférence à partir du SMS de confirmation retrouvé automatiquement.
-        card.addView(label("Étape 2 sur 2 · Déclarer le paiement"));
-        List<Txn> trouves = transfertsVers(w);
-        if (!trouves.isEmpty()) {
-            card.addView(text("Paiement trouvé dans vos SMS : vérifiez et déclarez-le.", 13, INK, false));
+        // Secours : paiement fait depuis un autre téléphone, ou SMS non reconnu.
+        TextView manuel = text((rechargeManuel ? "▾" : "▸") + "  J'ai payé autrement : déclarer l'ID à la main", 13, ACCENT, true);
+        manuel.setPadding(0, dp(8), 0, dp(4));
+        manuel.setOnClickListener(v -> { rechargeManuel = !rechargeManuel; render(); });
+        card.addView(manuel, fill());
+        if (rechargeManuel) {
+            List<Txn> trouves = transfertsVers(w);
             for (Txn t : trouves) {
                 LinearLayout k = column(4);
                 k.setBackground(box(GOOD_BG, 0, 12));
@@ -2259,28 +2341,17 @@ public class MainActivity extends Activity {
                 final String op = "OM".equals(t.op) ? "OM" : "MOMO";
                 final long fcfa = t.montant / 100;
                 final String ref = t.txnId;
-                k.addView(button("Déclarer cette recharge", true, v -> declarer(op, ref, fcfa)), fill());
+                k.addView(button("Déclarer ce paiement", true, v -> declarer(op, ref, fcfa)), fill());
                 card.addView(k, fill());
             }
-        } else {
-            card.addView(text("Le SMS de confirmation n'est pas encore lu. Attendez qu'il arrive (quelques secondes), puis touchez « Rechercher le SMS ».", 13, INK, false));
-            card.addView(button("Rechercher le SMS", true, v -> reload(true)), fill());
-            card.addView(text("Si vous avez payé depuis un autre téléphone, saisissez l'ID ci-dessous.", 12, MUTED, false));
-        }
-
-        TextView manuel = text((rechargeManuel ? "▾" : "▸") + "  Saisir l'ID à la main", 14, ACCENT, true);
-        manuel.setPadding(0, dp(8), 0, dp(4));
-        manuel.setOnClickListener(v -> { rechargeManuel = !rechargeManuel; render(); });
-        card.addView(manuel, fill());
-        if (rechargeManuel) {
             if (!w.numeroOm.isEmpty() && !w.numeroMomo.isEmpty()) {
                 card.addView(segmented(new String[] {"Orange Money", "MTN MoMo"}, om ? 0 : 1, k -> { rechargeOp = k == 0 ? "OM" : "MOMO"; render(); }), fill());
             }
-            if (rechargeMontant == null) {
-                rechargeMontant = amountField("Montant envoyé, en FCFA");
-                rechargeMontant.setInputType(InputType.TYPE_CLASS_NUMBER);
+            if (rechargeMontantManuel == null) {
+                rechargeMontantManuel = amountField("Montant envoyé, en FCFA");
+                rechargeMontantManuel.setInputType(InputType.TYPE_CLASS_NUMBER);
             }
-            card.addView(detach(rechargeMontant), fill());
+            card.addView(detach(rechargeMontantManuel), fill());
             if (rechargeRef == null) {
                 rechargeRef = new EditText(this);
                 rechargeRef.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
@@ -2290,8 +2361,7 @@ public class MainActivity extends Activity {
             card.addView(detach(rechargeRef), fill());
             card.addView(button("Déclarer la recharge", false, v -> declarerRecharge()), fill());
         }
-        card.addView(small("◂ Revoir les instructions de paiement", MUTED, v -> { rechargeEtape = 0; render(); }), fill());
-        card.addView(text("Votre solde est crédité dès que le paiement est vérifié.", 12, MUTED, false));
+        card.addView(text("Votre solde est crédité dès que le paiement est reçu par le marchand, en général en quelques minutes.", 12, MUTED, false));
     }
 
     /** Transferts récents (3 jours) de ce téléphone vers les numéros de recharge, pas encore déclarés. */
@@ -2405,7 +2475,10 @@ public class MainActivity extends Activity {
             acc.addView(b, fill());
         }
         page.addView(acc, fill());
-        if (Cloud.configured() && Cloud.loggedIn(this)) page.addView(caissesCard(), fill());
+        if (Cloud.configured() && Cloud.loggedIn(this)) page.addView(applicationsCard(), fill());
+        if (Cloud.configured() && Cloud.loggedIn(this) && visible(Modules.ALERTES)) page.addView(alertesCard(), fill());
+        if (Cloud.configured() && Cloud.loggedIn(this) && (visible(Modules.MULTI) || Cloud.caisses(this).liste.size() >= 2 || Cloud.caisseAChoisir(this)))
+            page.addView(caissesCard(), fill());
         page.addView(categoriesCard(), fill());
 
         // Réglages de la caisse.
@@ -2522,6 +2595,18 @@ public class MainActivity extends Activity {
             cat.addView(m, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         }
         row.addView(cat, fill());
+        if (l.reparti > 0) {
+            String rs = "Répartie : " + SmsParser.fmt(l.reparti) + (l.reste() > 0 ? " · reste à justifier " + SmsParser.fmt(l.reste()) : " · entièrement justifiée") + "  ›";
+            TextView rt = text(rs, 12, l.reste() > 0 ? WARN : GOOD, true);
+            rt.setOnClickListener(v -> ouvrirSuivi(Caisse.cle(t)));
+            row.addView(rt, fill());
+        }
+        Dettes.Engagement eng = engagementDe(Caisse.cle(t));
+        if (eng != null) {
+            TextView et = text((Dettes.CREANCE.equals(eng.type) ? "Créance · " : "Dette · ") + eng.tiers + "  ›", 12, PURPLE, true);
+            et.setOnClickListener(v -> ouvrirPersonne(eng.tiers));
+            row.addView(et, fill());
+        }
         for (String f : t.flags) if (f.startsWith("!")) row.addView(text(f.substring(1), 12, BAD, true));
 
         if (quick) {
@@ -2609,13 +2694,19 @@ public class MainActivity extends Activity {
                 + (t.nom != null ? "\n" + t.nom : "") + (t.numero != null ? " · " + t.numero : "")
                 + "\nMontant lu dans le SMS : non modifiable.", 13, MUTED, false));
 
-        final String[] choix = {l.categorie != null && !Caisse.AGENT.equals(l.categorie) ? l.categorie : null};
+        final String cleOp = Caisse.cle(t);
+        final String[] choix = {l.categorie != null && !Caisse.AGENT.equals(l.categorie) && !Caisse.REPARTI.equals(l.categorie) ? l.categorie : null};
+        Dettes.Engagement eng = engagementDe(cleOp);
+        ChampPersonne pers = new ChampPersonne(eng != null ? eng.tiers : (t.nom != null ? t.nom : t.numero != null ? formatNumero(t.numero) : null),
+                t.numero, eng != null ? eng.echeance : null);
         form.addView(text(t.sens > 0 ? "Catégorie d'entrée" : "Catégorie de sortie", 13, MUTED, false));
         LinearLayout grille = column(6);
         TextView aide = text("", 12, MUTED, false);
-        categorieGrid(grille, aide, t.sens, choix);
+        categorieGrid(grille, aide, t.sens, choix, () -> pers.maj(choix[0]));
         form.addView(grille, fill());
         form.addView(aide);
+        form.addView(pers.box, fill());
+        pers.maj(choix[0]);
 
         form.addView(text("Motif", 13, MUTED, false));
         EditText motif = new EditText(this);
@@ -2634,10 +2725,27 @@ public class MainActivity extends Activity {
 
         ScrollView sv = new ScrollView(this);
         sv.addView(form, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        new AlertDialog.Builder(this)
+        final AlertDialog[] dlg = new AlertDialog[1];
+        // Suivre cet argent (entrée) ou répartir cette sortie en plusieurs dépenses.
+        boolean suivi = liens.containsKey(cleOp) || l.reparti > 0;
+        Button suivre = small(suivi ? "Voir le suivi de cet argent  ›" : t.sens > 0 ? "Suivre cet argent (ce que j'en fais)  ›" : "Répartir cette sortie en dépenses  ›",
+                PURPLE, v -> { if (dlg[0] != null) dlg[0].dismiss(); commencerSuivi(cleOp); });
+        if (visible(Modules.SUIVI) || suivi) form.addView(suivre, fill());
+        dlg[0] = new AlertDialog.Builder(this)
                 .setTitle("Classer l'opération")
                 .setView(sv)
                 .setPositiveButton("Enregistrer", (d, w) -> {
+                    if (pers.requis() && pers.nom().isEmpty()) { notice("Indiquez la personne : opération non classée.", 2); return; }
+                    Long ech = pers.echeance();
+                    if (ech != null && ech < 0) { notice("Date de remboursement illisible : écrivez JJ/MM/AAAA.", 2); return; }
+                    final String cat = choix[0], nomP = pers.nom(), motifTxt = motif.getText().toString().trim();
+                    if (Dettes.estCategorieDette(cat) || eng != null) {
+                        io.execute(() -> {
+                            majEngagement(Store.get(this), cleOp, cat, nomP, t.numero, t.montant, t.date, ech, motifTxt);
+                            List<Dettes.Engagement> en = Store.get(this).engagements();
+                            runOnUiThread(() -> { engagements = en; render(); });
+                        });
+                    }
                     boolean always = t.numero != null && toujours.isChecked();
                     final String cleSens = t.numero != null ? Caisse.cleRegle(t.numero, t.sens) : null;
                     if (!always && t.numero != null && (regles.containsKey(cleSens) || regles.containsKey(t.numero))) {
@@ -2659,6 +2767,7 @@ public class MainActivity extends Activity {
     // ---------- Espèces ----------
 
     private void openEspeces() {
+        if (!exiger(Modules.CAISSE)) return;
         LinearLayout form = column(10);
         form.setPadding(dp(20), dp(8), dp(20), 0);
         final int[] sens = {1};
@@ -2677,6 +2786,7 @@ public class MainActivity extends Activity {
         form.addView(montant, fill());
 
         TextView catTitre = text("", 13, MUTED, false);
+        final ChampPersonne[] persRef = new ChampPersonne[1];
         form.addView(catTitre);
         form.addView(grille, fill());
         form.addView(aide);
@@ -2684,27 +2794,35 @@ public class MainActivity extends Activity {
             select(in, sens[0] > 0);
             select(out, sens[0] < 0);
             catTitre.setText(sens[0] > 0 ? "Catégorie d'entrée" : "Catégorie de sortie");
-            categorieGrid(grille, aide, sens[0], cat);
+            categorieGrid(grille, aide, sens[0], cat, () -> { if (persRef[0] != null) persRef[0].maj(cat[0]); });
         };
         // En changeant de sens, une catégorie qui ne va pas avec le nouveau sens est remplacée par la plus courante.
         in.setOnClickListener(v -> { sens[0] = 1; if (!Caisse.compatible(cat[0], 1)) cat[0] = Caisse.VENTE; paint.run(); });
+        ChampPersonne pers = new ChampPersonne(null, null, null);
         out.setOnClickListener(v -> { sens[0] = -1; if (!Caisse.compatible(cat[0], -1)) cat[0] = Caisse.ACHAT; paint.run(); });
+        persRef[0] = pers;
         paint.run();
+        form.addView(pers.box, fill());
 
         EditText libelle = new EditText(this);
         libelle.setInputType(InputType.TYPE_CLASS_TEXT);
         libelle.setHint("Motif (facultatif)");
         form.addView(libelle, fill());
 
+        ScrollView svE = new ScrollView(this);
+        svE.addView(form, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         new AlertDialog.Builder(this)
                 .setTitle("Mouvement d'espèces")
-                .setView(form)
+                .setView(svE)
                 .setPositiveButton("Enregistrer", (d, w) -> {
                     Long cents = SmsParser.money(montant.getText().toString());
                     if (cents == null || cents <= 0) {
                         notice("Montant invalide : mouvement non enregistré.", 2);
                         return;
                     }
+                    if (pers.requis() && pers.nom().isEmpty()) { notice("Indiquez la personne : mouvement non enregistré.", 2); return; }
+                    Long ech = pers.echeance();
+                    if (ech != null && ech < 0) { notice("Date de remboursement illisible : écrivez JJ/MM/AAAA.", 2); return; }
                     Caisse.Saisie s = new Caisse.Saisie();
                     s.date = System.currentTimeMillis();
                     s.mode = Caisse.ESPECES;
@@ -2712,8 +2830,10 @@ public class MainActivity extends Activity {
                     s.montant = cents;
                     s.categorie = cat[0];
                     s.libelle = libelle.getText().toString().trim();
+                    final String nomP = pers.nom();
                     io.execute(() -> {
                         Store.get(this).addSaisie(s);
+                        if (Dettes.estCategorieDette(s.categorie)) majEngagement(Store.get(this), Suivi.cle(s), s.categorie, nomP, null, cents, s.date, ech, s.libelle);
                         SyncJob.soon(this);
                         runOnUiThread(() -> {
                             notice((s.sens > 0 ? "Entrée" : "Sortie") + " d'espèces de " + SmsParser.fmt(cents) + " FCFA enregistrée.", 1);
@@ -2732,6 +2852,7 @@ public class MainActivity extends Activity {
                         + ". Il restera visible, marqué « Annulé », et ne comptera plus dans la caisse.")
                 .setPositiveButton("Annuler le mouvement", (d, w) -> io.execute(() -> {
                     Store.get(this).annulerSaisie(s.id);
+                    if (s.uid != null) majEngagement(Store.get(this), Suivi.cle(s), null, null, null, 0, 0, null, null);
                     SyncJob.soon(this);
                     runOnUiThread(() -> reload(false));
                 }))
@@ -2742,6 +2863,7 @@ public class MainActivity extends Activity {
     // ---------- Fond de caisse et clôture ----------
 
     private void openFond() {
+        if (!exiger(Modules.CAISSE)) return;
         String today = Caisse.jourDe(System.currentTimeMillis());
         Caisse.Jour j = null;
         Long last = null;
@@ -2773,6 +2895,7 @@ public class MainActivity extends Activity {
     }
 
     private void openCloture() {
+        if (!exiger(Modules.CAISSE)) return;
         String today = Caisse.jourDe(System.currentTimeMillis());
         Caisse.Bilan b = computeBilan(Caisse.debutJour(today), Long.MAX_VALUE);
         Caisse.Especes e = b.especes;
@@ -2922,6 +3045,8 @@ public class MainActivity extends Activity {
             final int n = niveau;
             runOnUiThread(() -> {
                 if (n == 1 && secretField != null) secretField.setText("");
+                etatModules = Cloud.modules(this);
+                if (n != 2 && etatModules.aChoisir()) { choixModules = true; profilChoisi = -1; cochees.clear(); }
                 notice(m, n);
                 reload(false);
             });
@@ -2979,7 +3104,7 @@ public class MainActivity extends Activity {
     /** Déclaration saisie à la main. */
     private void declarerRecharge() {
         Cloud.Portefeuille w = Cloud.portefeuille(this);
-        String digits = rechargeMontant.getText().toString().replaceAll("\\D", "");
+        String digits = rechargeMontantManuel.getText().toString().replaceAll("\\D", "");
         long montant = digits.isEmpty() || digits.length() > 7 ? 0 : Long.parseLong(digits);
         String ref = rechargeRef.getText().toString().trim();
         if (montant < w.rechargeMin) { notice("Indiquez le montant envoyé (minimum " + Tarif.fcfa(w.rechargeMin) + ").", 2); return; }
@@ -2998,30 +3123,1502 @@ public class MainActivity extends Activity {
             try {
                 msg = Cloud.declarerRecharge(this, op, ref, montant);
                 niveau = 1;
-                String deja = Store.pref(this, "recharges_declarees", "");
-                Store.savePref(this, "recharges_declarees", (deja.isEmpty() ? "" : deja + ",") + ref.toUpperCase(Locale.ROOT));
+                Cloud.marquerDeclaree(this, ref);
             } catch (Cloud.CloudException e) {
                 msg = e.getMessage();
                 niveau = 2;
-                if (msg != null && msg.contains("déjà été déclaré")) {
-                    String deja = Store.pref(this, "recharges_declarees", "");
-                    Store.savePref(this, "recharges_declarees", (deja.isEmpty() ? "" : deja + ",") + ref.toUpperCase(Locale.ROOT));
-                }
+                if (msg != null && msg.contains("déjà été déclaré")) Cloud.marquerDeclaree(this, ref);
             }
             final String m = msg;
             final int n = niveau;
             runOnUiThread(() -> {
                 if (n == 1) {
                     if (rechargeRef != null) rechargeRef.setText("");
-                    if (rechargeMontant != null) rechargeMontant.setText("");
+                    if (rechargeMontantManuel != null) rechargeMontantManuel.setText("");
                     rechargeOuverte = false;
-                    rechargeEtape = 0;
                     rechargeManuel = false;
+                    Cloud.setRechargeAttente(this, null);
                 }
                 notice(m, n);
                 render();
             });
         });
+    }
+
+    // ---------- Applications à la carte (0.11) ----------
+
+    /** État des applications (relu après chaque synchronisation ou activation). */
+    private Modules.Etat mods() {
+        if (etatModules == null) etatModules = Cloud.modules(this);
+        return etatModules;
+    }
+
+    /** Accès à une application. Sans serveur configuré (version de test) : tout est ouvert. */
+    private Modules.Acces acces(String code) {
+        if (!Cloud.configured()) return Modules.Acces.ACTIF;
+        if (!Cloud.loggedIn(this)) return Modules.Acces.ABSENT;
+        return mods().acces(code, System.currentTimeMillis());
+    }
+
+    private boolean actif(String code) {
+        return acces(code) == Modules.Acces.ACTIF;
+    }
+
+    /** Visible (active ou en lecture seule). */
+    private boolean visible(String code) {
+        return acces(code) != Modules.Acces.ABSENT;
+    }
+
+    /** Vrai si l'application est active ; sinon propose de l'installer et renvoie faux. */
+    private boolean exiger(String code) {
+        if (actif(code)) return true;
+        proposerModule(code);
+        return false;
+    }
+
+    private String nomModule(String code) {
+        Modules.Module m = mods().module(code);
+        if (m != null) return m.nom;
+        switch (code) {
+            case Modules.CAISSE: return "Caisse commerçant";
+            case Modules.FINANCES: return "Finances & budgets";
+            case Modules.SUIVI: return "Suivi de l'argent";
+            case Modules.DETTES: return "Dettes & créances";
+            case Modules.MULTI: return "Multi-téléphones";
+            default: return code;
+        }
+    }
+
+    /** Libellé du bouton principal d'une application ou d'un pack. */
+    private String boutonModule(String code) {
+        Modules.Etat e = mods();
+        Modules.Module m = e.module(code);
+        Modules.Abonnement a = e.abonnement(code);
+        if (a == null || !a.essaiUtilise) return "Essayer " + e.essaiJours + " jours gratuits";
+        if (a.fin > System.currentTimeMillis() + e.decalage) return a.renouveler ? "Active" : "Reprendre le renouvellement";
+        return "Activer · " + Tarif.fcfa(m != null ? m.prixCompte : 0) + "/mois";
+    }
+
+    /** Fenêtre de présentation d'une application qu'on n'a pas (ou plus). */
+    private void proposerModule(String code) {
+        if (!Cloud.configured()) return;
+        if (!Cloud.loggedIn(this)) {
+            notice("« " + nomModule(code) + " » demande un compte (gratuit) : créez-le dans l'onglet Compte, puis essayez l'application "
+                    + mods().essaiJours + " jours gratuitement.", 0);
+            showPage(PAGE_COMPTE);
+            return;
+        }
+        Modules.Module m = mods().module(code);
+        Modules.Module pack = null;
+        for (Modules.Module x : mods().catalogue) if (x.estPack && x.contenu.contains(code) && (pack == null || x.prixCompte < pack.prixCompte)) pack = x;
+        String msg = (m != null ? m.description : "") + "\n\n" + Modules.etatTexte(mods(), code, System.currentTimeMillis())
+                + (m != null ? "\nPrix : " + Tarif.fcfa(m.prixCompte) + " par mois après l'essai." : "")
+                + (pack != null ? "\n\nAussi dans le " + pack.nom + " (" + Tarif.fcfa(pack.prixCompte) + "/mois)." : "");
+        new AlertDialog.Builder(this)
+                .setTitle(nomModule(code))
+                .setMessage(msg)
+                .setPositiveButton(boutonModule(code), (d, w) -> activer(code))
+                .setNeutralButton("Toutes les applications", (d, w) -> ouvrirApplications())
+                .setNegativeButton("Plus tard", null)
+                .show();
+    }
+
+    /** Active une application ou un pack ; confirme d'abord si de l'argent va être débité. */
+    private void activer(String code) {
+        Modules.Etat e = mods();
+        Modules.Module m = e.module(code);
+        Modules.Abonnement a = e.abonnement(code);
+        boolean payant = a != null && a.essaiUtilise && a.fin <= System.currentTimeMillis() + e.decalage;
+        Runnable go = () -> {
+            notice("Activation de « " + nomModule(code) + " »…", 0);
+            io.execute(() -> {
+                String msg;
+                int n;
+                try {
+                    msg = Cloud.activerModule(this, code);
+                    n = 1;
+                } catch (Cloud.CloudException ex) {
+                    msg = ex.getMessage();
+                    n = 2;
+                }
+                final String fm = msg;
+                final int fn = n;
+                runOnUiThread(() -> { etatModules = Cloud.modules(this); notice(fm, fn); render(); });
+            });
+        };
+        if (!payant || m == null) { go.run(); return; }
+        Cloud.Portefeuille w = Cloud.portefeuille(this);
+        new AlertDialog.Builder(this)
+                .setTitle("Activer " + m.nom + " ?")
+                .setMessage(Tarif.fcfa(m.prixCompte) + " seront débités de votre porte-monnaie (solde : " + Tarif.fcfa(Math.max(0, w.solde)) + ").\n\n"
+                        + "L'application est active un mois et se renouvelle chaque mois si le solde suffit. Vous pouvez arrêter le renouvellement à tout moment.")
+                .setPositiveButton("Activer", (d, x) -> go.run())
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void arreter(String code) {
+        new AlertDialog.Builder(this)
+                .setTitle("Arrêter le renouvellement ?")
+                .setMessage("« " + nomModule(code) + " » reste active jusqu'à la fin de la période payée, puis passe en lecture seule. Vos données sont gardées.")
+                .setPositiveButton("Arrêter", (d, w) -> io.execute(() -> {
+                    String msg;
+                    try {
+                        Cloud.arreterModule(this, code);
+                        msg = "Renouvellement arrêté.";
+                    } catch (Cloud.CloudException ex) {
+                        msg = ex.getMessage();
+                    }
+                    final String fm = msg;
+                    runOnUiThread(() -> { etatModules = Cloud.modules(this); notice(fm, 0); render(); });
+                }))
+                .setNegativeButton("Garder", null)
+                .show();
+    }
+
+    /** Carte qui présente une application absente (ou en lecture seule) à l'endroit où elle servirait. */
+    private View promoModule(String code, String accroche) {
+        LinearLayout c = card();
+        Modules.Acces ac = acces(code);
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text(nomModule(code), 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(chip(ac == Modules.Acces.LECTURE ? "Lecture seule" : "Application", ac == Modules.Acces.LECTURE ? WARN : PURPLE,
+                ac == Modules.Acces.LECTURE ? WARN_BG : SURFACE));
+        c.addView(head, fill());
+        c.addView(text(accroche, 13, MUTED, false));
+        c.addView(button(Cloud.loggedIn(this) ? boutonModule(code) : "Créer un compte pour l'essayer", true, v -> {
+            if (Cloud.loggedIn(this)) activer(code); else proposerModule(code);
+        }), fill());
+        return c;
+    }
+
+    /** Bandeau « lecture seule » au-dessus d'une partie dont l'abonnement est terminé. */
+    private View bandeauLecture(String code) {
+        TextView t = text("Lecture seule : « " + nomModule(code) + " » n'est plus active. Vos données restent visibles ; touchez ici pour la réactiver.",
+                13, WARN, true);
+        t.setBackground(box(WARN_BG, 0, 10));
+        t.setPadding(dp(12), dp(9), dp(12), dp(9));
+        t.setOnClickListener(v -> activer(code));
+        return t;
+    }
+
+    /** Rappels en haut de la Caisse : mois offert qui se termine, solde trop bas pour les renouvellements. */
+    private View bandeauModules() {
+        if (!Cloud.configured() || !Cloud.loggedIn(this)) return null;
+        long now = System.currentTimeMillis();
+        Modules.Etat e = mods();
+        String msg = e.rappel(now);
+        long offre = e.finOffre(now);
+        if (msg == null && offre > 0)
+            msg = "Vos applications offertes s'arrêtent le " + Modules.date(offre) + ". Choisissez celles que vous gardez  ›";
+        if (msg == null) return null;
+        TextView t = text(msg, 13, WARN, true);
+        t.setBackground(box(WARN_BG, 0, 10));
+        t.setPadding(dp(12), dp(9), dp(12), dp(9));
+        t.setOnClickListener(v -> ouvrirApplications());
+        return t;
+    }
+
+    // ---------- Alertes WhatsApp (0.12) ----------
+
+    /** Carte de l'onglet Compte : destinataires, choix des alertes, envoi d'essai. */
+    private View alertesCard() {
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("Alertes WhatsApp", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (!actif(Modules.ALERTES)) head.addView(chip("Lecture seule", WARN, WARN_BG));
+        c.addView(head, fill());
+        org.json.JSONObject etat = Cloud.alertesEtat(this);
+        if (etat == null) {
+            c.addView(text("Chargement des réglages… (il faut du réseau)", 13, MUTED, false));
+            if (!alertesChargees) {
+                alertesChargees = true;
+                io.execute(() -> {
+                    try { Cloud.rafraichirAlertes(this); } catch (Exception ignored) {}
+                    runOnUiThread(this::render);
+                });
+            }
+            return c;
+        }
+        if (!Cloud.whatsappConfigure(this)) {
+            TextView w = text("L'envoi WhatsApp est en cours d'activation par le service client : vos alertes attendent jusqu'à 24 heures puis expirent.", 12, WARN, false);
+            w.setBackground(box(WARN_BG, 0, 10));
+            w.setPadding(dp(10), dp(8), dp(10), dp(8));
+            c.addView(w, fill());
+        }
+
+        // Destinataires.
+        c.addView(label("Destinataires (3 au plus)"));
+        org.json.JSONArray dest = etat.optJSONArray("destinataires");
+        int nb = dest == null ? 0 : dest.length();
+        for (int i = 0; i < nb; i++) {
+            org.json.JSONObject d = dest.optJSONObject(i);
+            if (d == null) continue;
+            String num = d.optString("numero", ""), nom = d.optString("nom", "");
+            boolean ok = d.optBoolean("confirme", false);
+            LinearLayout r = new LinearLayout(this);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setPadding(0, dp(4), 0, dp(4));
+            LinearLayout t = column(0);
+            t.addView(text((nom.isEmpty() ? "" : nom + " · ") + formatNumero(num), 14, INK, true));
+            t.addView(text(ok ? "✓ Confirmé" : "En attente du code", 12, ok ? GOOD : WARN, false));
+            r.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            if (!ok) r.addView(small("Saisir le code", ACCENT, v -> saisirCode(num)));
+            r.addView(small("Retirer", BAD, v -> appelAlerte(() -> Cloud.retirerDestinataire(this, num), "Numéro retiré.")));
+            c.addView(r, fill());
+        }
+        if (nb == 0) c.addView(text("Ajoutez votre numéro WhatsApp (et jusqu'à 2 autres : associé, comptable). Chacun reçoit un code à confirmer.", 13, MUTED, false));
+        if (nb < 3) c.addView(button("+ Ajouter un numéro", false, v -> ajouterDestinataire(nb == 0)), fill());
+
+        // Choix des alertes.
+        Alertes.Reglages g = Cloud.reglagesAlertes(this);
+        c.addView(label("Messages envoyés"));
+        CheckBox bilan = new CheckBox(this);
+        bilan.setText("Bilan du soir (ventes, dépenses, résultat, soldes)");
+        bilan.setChecked(g.bilan);
+        c.addView(bilan, fill());
+        LinearLayout hr = new LinearLayout(this);
+        hr.setGravity(Gravity.CENTER_VERTICAL);
+        hr.addView(text("    à partir de", 13, MUTED, false));
+        EditText heure = amountField("20");
+        heure.setText(String.valueOf(g.bilanHeure));
+        hr.addView(heure, new LinearLayout.LayoutParams(dp(70), ViewGroup.LayoutParams.WRAP_CONTENT));
+        hr.addView(text("heures", 13, MUTED, false));
+        c.addView(hr, fill());
+        CheckBox ecart = new CheckBox(this);
+        ecart.setText("Écart de caisse à la clôture");
+        ecart.setChecked(g.ecart);
+        c.addView(ecart, fill());
+        CheckBox chaine = new CheckBox(this);
+        chaine.setText("SMS manquant ou faux (chaîne des soldes rompue)");
+        chaine.setChecked(g.chaine);
+        c.addView(chaine, fill());
+        CheckBox solde = new CheckBox(this);
+        solde.setText("Solde bas");
+        solde.setChecked(g.solde);
+        c.addView(solde, fill());
+        LinearLayout sr = new LinearLayout(this);
+        sr.setGravity(Gravity.CENTER_VERTICAL);
+        EditText sOm = amountField("OM");
+        sOm.setText(String.valueOf(g.seuilOm));
+        EditText sMomo = amountField("MoMo");
+        sMomo.setText(String.valueOf(g.seuilMomo));
+        sr.addView(text("    OM sous", 13, MUTED, false));
+        sr.addView(sOm, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        sr.addView(text(" MoMo sous", 13, MUTED, false));
+        sr.addView(sMomo, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        c.addView(sr, fill());
+        CheckBox dettes = new CheckBox(this);
+        dettes.setText("Échéances de dettes (aujourd'hui et en retard)");
+        dettes.setChecked(g.dettes);
+        c.addView(dettes, fill());
+        if (!visible(Modules.DETTES)) c.addView(text("    Demande l'application Dettes & créances.", 12, MUTED, false));
+
+        LinearLayout act = new LinearLayout(this);
+        act.addView(button("Enregistrer", true, v -> {
+            try {
+                org.json.JSONObject p = new org.json.JSONObject();
+                p.put("bilan", bilan.isChecked());
+                p.put("bilan_heure", entier(heure, 20));
+                p.put("ecart", ecart.isChecked());
+                p.put("chaine", chaine.isChecked());
+                p.put("solde", solde.isChecked());
+                p.put("seuil_om", entier(sOm, 5000));
+                p.put("seuil_momo", entier(sMomo, 5000));
+                p.put("dettes", dettes.isChecked());
+                if (!exiger(Modules.ALERTES)) return;
+                appelAlerte(() -> Cloud.reglerAlertes(this, p), "Réglages des alertes enregistrés.");
+            } catch (Exception e) {
+                notice("Réglages invalides.", 2);
+            }
+        }), weight(false));
+        act.addView(button("Envoyer le bilan maintenant", false, v -> {
+            if (!exiger(Modules.ALERTES)) return;
+            notice("Envoi du bilan du jour…", 0);
+            io.execute(() -> {
+                String m;
+                int n;
+                try { m = Cloud.envoyerBilanMaintenant(this); n = 1; } catch (Cloud.CloudException e) { m = e.getMessage(); n = 2; }
+                final String fm = m;
+                final int fn = n;
+                runOnUiThread(() -> { notice(fm, fn); render(); });
+            });
+        }), weight(true));
+        c.addView(act, fill());
+
+        // Derniers envois.
+        org.json.JSONArray rec = etat.optJSONArray("recents");
+        if (rec != null && rec.length() > 0) {
+            c.addView(label("Derniers messages · " + etat.optInt("envois_jour", 0) + " sur 30 aujourd'hui"));
+            for (int i = 0; i < Math.min(5, rec.length()); i++) {
+                org.json.JSONObject x = rec.optJSONObject(i);
+                if (x == null) continue;
+                String st = x.optString("statut", "");
+                String lib = "envoye".equals(st) ? "✓ envoyé" : "en_attente".equals(st) ? "en attente" : "expire".equals(st) ? "expiré" : "échec";
+                c.addView(text(when(x.optLong("quand", 0)) + " · " + typeAlerte(x.optString("type", "")) + " → " + formatNumero(x.optString("numero", ""))
+                        + " · " + lib, 12, "envoye".equals(st) ? MUTED : WARN, false));
+            }
+        }
+        return c;
+    }
+
+    private static String typeAlerte(String t) {
+        switch (t) {
+            case "bilan": return "Bilan";
+            case "ecart": return "Écart de caisse";
+            case "chaine": return "SMS manquant";
+            case "solde": return "Solde bas";
+            case "dettes": return "Échéances";
+            default: return t;
+        }
+    }
+
+    private static int entier(EditText e, int defaut) {
+        String d = e.getText().toString().replaceAll("\\D", "");
+        if (d.isEmpty() || d.length() > 8) return defaut;
+        return Integer.parseInt(d);
+    }
+
+    private interface AppelCloud { void run() throws Cloud.CloudException; }
+
+    private void appelAlerte(AppelCloud a, String ok) {
+        io.execute(() -> {
+            String m;
+            int n;
+            try { a.run(); m = ok; n = 1; } catch (Cloud.CloudException e) { m = e.getMessage(); n = 2; }
+            final String fm = m;
+            final int fn = n;
+            runOnUiThread(() -> { notice(fm, fn); render(); });
+        });
+    }
+
+    private void ajouterDestinataire(boolean premier) {
+        if (!exiger(Modules.ALERTES)) return;
+        LinearLayout f = column(8);
+        f.setPadding(dp(20), dp(8), dp(20), 0);
+        EditText num = new EditText(this);
+        num.setInputType(InputType.TYPE_CLASS_PHONE);
+        num.setHint("Numéro WhatsApp (6XXXXXXXX)");
+        if (premier) num.setText(Cloud.phone(this));
+        f.addView(num, fill());
+        EditText nom = new EditText(this);
+        nom.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        nom.setHint("Nom (ex. Patron, Comptable)");
+        f.addView(nom, fill());
+        f.addView(text("Un code à 6 chiffres sera envoyé sur WhatsApp à ce numéro.", 12, MUTED, false));
+        new AlertDialog.Builder(this)
+                .setTitle("Ajouter un numéro")
+                .setView(f)
+                .setPositiveButton("Envoyer le code", (d, w) -> {
+                    String p9 = Cloud.phone9(num.getText().toString());
+                    if (p9 == null) { notice("Numéro invalide : 9 chiffres, 6XXXXXXXX.", 2); return; }
+                    notice("Envoi du code sur WhatsApp…", 0);
+                    io.execute(() -> {
+                        String m = null;
+                        try { Cloud.demanderCode(this, p9, nom.getText().toString().trim()); } catch (Cloud.CloudException e) { m = e.getMessage(); }
+                        final String fm = m;
+                        runOnUiThread(() -> {
+                            render();
+                            if (fm != null) notice(fm, 2); else saisirCode(p9);
+                        });
+                    });
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void saisirCode(String numero) {
+        EditText code = amountField("Code à 6 chiffres");
+        LinearLayout f = column(8);
+        f.setPadding(dp(20), dp(8), dp(20), 0);
+        f.addView(text("Code reçu sur WhatsApp au " + formatNumero(numero) + " (valable 10 minutes).", 13, MUTED, false));
+        f.addView(code, fill());
+        new AlertDialog.Builder(this)
+                .setTitle("Confirmer le numéro")
+                .setView(f)
+                .setPositiveButton("Confirmer", (d, w) -> appelAlerte(() -> Cloud.confirmerDestinataire(this, numero, code.getText().toString().trim()),
+                        "Numéro confirmé : il recevra vos alertes."))
+                .setNeutralButton("Renvoyer un code", (d, w) -> io.execute(() -> {
+                    String m;
+                    int n;
+                    try { Cloud.demanderCode(this, numero, ""); m = "Nouveau code envoyé."; n = 1; } catch (Cloud.CloudException e) { m = e.getMessage(); n = 2; }
+                    final String fm = m;
+                    final int fn = n;
+                    runOnUiThread(() -> { notice(fm, fn); if (fn == 1) saisirCode(numero); });
+                }))
+                .setNegativeButton("Plus tard", null)
+                .show();
+    }
+
+    private void ouvrirApplications() {
+        fermerDetail();
+        applicationsOuvert = true;
+        pageIdx = PAGE_COMPTE;
+        render();
+        scroll.scrollTo(0, 0);
+        if (Cloud.loggedIn(this)) io.execute(() -> {
+            try { Cloud.rafraichirModules(this); } catch (Exception ignored) {}
+            runOnUiThread(() -> { etatModules = Cloud.modules(this); if (applicationsOuvert) render(); });
+        });
+    }
+
+    /** Carte de l'onglet Compte : applications actives et accès au catalogue. */
+    private View applicationsCard() {
+        LinearLayout c = card();
+        c.addView(text("Mes applications", 16, INK, true));
+        long now = System.currentTimeMillis();
+        List<String> noms = new ArrayList<>();
+        for (String code : mods().actifs(now)) noms.add(nomModule(code));
+        c.addView(text("Base gratuite (lecture des SMS, journal, entrées et dépenses)" + (noms.isEmpty() ? "" : " + " + String.join(", ", noms)) + ".", 13, MUTED, false));
+        c.addView(button("Gérer mes applications  ›", false, v -> ouvrirApplications()), fill());
+        return c;
+    }
+
+    private void applicationsPage() {
+        page.addView(retour("Compte"));
+        pageTitle("Applications", "Installez seulement ce qui vous sert");
+        Modules.Etat e = mods();
+        long now = System.currentTimeMillis();
+        if (!Cloud.loggedIn(this)) {
+            page.addView(empty("Créez un compte (gratuit) pour installer des applications."));
+            return;
+        }
+        if (!e.connu) {
+            page.addView(empty("Chargement des applications… (il faut du réseau la première fois)"));
+            return;
+        }
+        Cloud.Portefeuille w = Cloud.portefeuille(this);
+        page.addView(kvSmall("Porte-monnaie", Tarif.fcfa(Math.max(0, w.solde))));
+        String rap = e.rappel(now);
+        if (rap != null) {
+            TextView t = text(rap, 13, WARN, true);
+            t.setBackground(box(WARN_BG, 0, 10));
+            t.setPadding(dp(12), dp(9), dp(12), dp(9));
+            page.addView(t, fill());
+        }
+
+        LinearLayout base = card();
+        LinearLayout bh = new LinearLayout(this);
+        bh.setGravity(Gravity.CENTER_VERTICAL);
+        bh.addView(text("Base", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        bh.addView(chip("Gratuite · incluse", GOOD, GOOD_BG));
+        base.addView(bh, fill());
+        base.addView(text("Lecture des SMS Orange Money, MTN MoMo et banques, journal et classement des opérations, entrées et dépenses par catégorie, "
+                + "soldes de chaque compte, catégories personnelles, sauvegarde.", 13, MUTED, false));
+        page.addView(base, fill());
+
+        page.addView(label("Packs : plusieurs applications moins cher"));
+        for (Modules.Module m : e.catalogue) if (m.estPack) page.addView(moduleTuile(m, now), fill());
+        page.addView(label("Applications"));
+        for (Modules.Module m : e.catalogue) if (!m.estPack) page.addView(moduleTuile(m, now), fill());
+        page.addView(text("Chaque application démarre par " + e.essaiJours + " jours d'essai gratuit, puis se paie au mois depuis votre porte-monnaie. "
+                + "Non renouvelée, elle passe en lecture seule : vous gardez toutes vos données. L'export Excel est inclus avec Finances & budgets.", 12, MUTED, false));
+    }
+
+    private View moduleTuile(Modules.Module m, long now) {
+        Modules.Etat e = mods();
+        LinearLayout c = card();
+        Modules.Acces ac = m.estPack ? (e.abonnement(m.code) == null ? Modules.Acces.ABSENT
+                : e.abonnement(m.code).fin > now + e.decalage ? Modules.Acces.ACTIF : Modules.Acces.LECTURE) : e.acces(m.code, now);
+        Modules.Module pack = m.estPack ? null : e.packActif(m.code, now);
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView ic = text(m.nom.substring(0, 1), 18, Color.WHITE, true);
+        ic.setGravity(Gravity.CENTER);
+        ic.setBackground(box(ac == Modules.Acces.ACTIF ? ACCENT : ac == Modules.Acces.LECTURE ? WARN : MUTED, 0, 12));
+        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(dp(40), dp(40));
+        il.setMarginEnd(dp(12));
+        head.addView(ic, il);
+        LinearLayout tx = column(1);
+        tx.addView(text(m.nom, 15, INK, true));
+        String prix = Tarif.fcfa(m.prixCompte) + " / mois" + (m.parTelephone ? " (" + Tarif.fcfa(m.prix) + " par téléphone en plus)" : "");
+        if (m.estPack) {
+            long separes = 0;
+            for (String x : m.contenu) { Modules.Module y = e.module(x); if (y != null) separes += y.prixCompte; }
+            if (separes > m.prixCompte) prix += " au lieu de " + Tarif.fcfa(separes);
+        }
+        tx.addView(text(prix, 13, ACCENT, true));
+        head.addView(tx, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        c.addView(head, fill());
+        c.addView(text(m.description, 13, MUTED, false));
+        c.addView(text(Modules.etatTexte(e, m.code, now), 12, ac == Modules.Acces.ACTIF ? GOOD : ac == Modules.Acces.LECTURE ? WARN : MUTED, true));
+        if (pack != null) return c;
+        Modules.Abonnement a = e.abonnement(m.code);
+        LinearLayout act = new LinearLayout(this);
+        if (ac == Modules.Acces.ACTIF && a != null && a.renouveler) {
+            act.addView(button("Arrêter le renouvellement", false, v -> arreter(m.code)), weight(true));
+        } else {
+            act.addView(button(boutonModule(m.code), true, v -> activer(m.code)), weight(true));
+        }
+        c.addView(act, fill());
+        return c;
+    }
+
+    // ----- Choix des applications à l'inscription -----
+
+    private void choixModulesPage() {
+        Modules.Etat e = mods();
+        pageTitle("Bienvenue !", "Choisissez les applications qui vous servent");
+        page.addView(text("La base est gratuite : lecture de vos SMS Orange Money, MoMo et banques, journal, entrées et dépenses par catégorie. "
+                + "Ajoutez seulement ce dont vous avez besoin : chaque application est gratuite " + e.essaiJours + " jours, sans engagement.", 13, MUTED, false));
+        page.addView(label("Vous êtes…"));
+        for (int i = 0; i < Modules.PROFILS.length; i++) {
+            final int k = i;
+            String[] p = Modules.PROFILS[i];
+            boolean on = profilChoisi == i;
+            LinearLayout r = column(2);
+            r.setPadding(dp(14), dp(12), dp(14), dp(12));
+            r.setBackground(box(on ? GOOD_BG : SURFACE, on ? ACCENT : LINE, 14));
+            Modules.Module pk = p[2].isEmpty() ? null : e.module(p[2]);
+            r.addView(text((on ? "●  " : "○  ") + p[0] + (pk != null ? " · " + Tarif.fcfa(pk.prixCompte) + "/mois après l'essai" : ""), 15, on ? ACCENT : INK, true));
+            r.addView(text(p[1] + (pk != null ? " — " + pk.description : ""), 12, MUTED, false));
+            r.setOnClickListener(v -> {
+                profilChoisi = k;
+                cochees.clear();
+                if (pk != null) cochees.addAll(pk.contenu);
+                render();
+            });
+            page.addView(r, fill());
+        }
+        if (profilChoisi == Modules.PROFILS.length - 1) {
+            LinearLayout l = card();
+            for (String code : Modules.TOUTES) {
+                Modules.Module m = e.module(code);
+                if (m == null) continue;
+                CheckBox cb = new CheckBox(this);
+                cb.setText(m.nom + " · " + Tarif.fcfa(m.prixCompte) + "/mois");
+                cb.setChecked(cochees.contains(code));
+                cb.setOnClickListener(v -> { if (cb.isChecked()) cochees.add(code); else cochees.remove(code); render(); });
+                l.addView(cb, fill());
+                l.addView(text(m.description, 12, MUTED, false));
+            }
+            String pc = Modules.packConseille(e, cochees);
+            if (pc != null && !cochees.equals(new java.util.HashSet<>(e.module(pc).contenu)))
+                l.addView(text("Astuce : le " + e.module(pc).nom + " contient tout cela pour " + Tarif.fcfa(e.module(pc).prixCompte) + "/mois.", 12, ACCENT, true));
+            page.addView(l, fill());
+        }
+        List<String> choix = choixActuel();
+        String bouton = choix.isEmpty() ? "Continuer avec la base gratuite"
+                : "Commencer · " + e.essaiJours + " jours gratuits, puis " + Tarif.fcfa(Modules.prixMensuel(e, choix)) + "/mois";
+        Button go = button(bouton, true, v -> installerChoix(choix));
+        go.setMinHeight(dp(52));
+        page.addView(go, fill());
+        page.addView(small("Plus tard", MUTED, v -> {
+            Store.savePref(this, "choix_modules_fait", "1");
+            choixModules = false;
+            render();
+        }), fill());
+        page.addView(text("Vous pourrez ajouter ou retirer des applications à tout moment dans Compte → Applications.", 12, MUTED, false));
+    }
+
+    /** Sélection à installer : le pack du profil, ou (sur mesure) le pack conseillé ou les applications cochées. */
+    private List<String> choixActuel() {
+        List<String> out = new ArrayList<>();
+        if (profilChoisi < 0) return out;
+        String pk = Modules.PROFILS[profilChoisi][2];
+        if (!pk.isEmpty()) { out.add(pk); return out; }
+        String pc = Modules.packConseille(mods(), cochees);
+        if (pc != null && new java.util.HashSet<>(mods().module(pc).contenu).equals(cochees)) { out.add(pc); return out; }
+        for (String c : Modules.TOUTES) if (cochees.contains(c)) out.add(c);
+        return out;
+    }
+
+    private void installerChoix(List<String> choix) {
+        Store.savePref(this, "choix_modules_fait", "1");
+        if (choix.isEmpty()) { choixModules = false; render(); return; }
+        notice("Installation de vos applications…", 0);
+        io.execute(() -> {
+            List<String> ok = new ArrayList<>();
+            String err = null;
+            for (String c : choix) {
+                try { Cloud.activerModule(this, c); ok.add(nomModule(c)); } catch (Cloud.CloudException ex) { err = ex.getMessage(); }
+            }
+            final String fe = err;
+            runOnUiThread(() -> {
+                etatModules = Cloud.modules(this);
+                choixModules = false;
+                if (fe != null) notice(fe, 2);
+                else notice(String.join(", ", ok) + " : essai gratuit de " + mods().essaiJours + " jours. Bonne gestion !", 1);
+                render();
+            });
+        });
+    }
+
+    // ---------- Recharge en un geste (0.10) ----------
+
+    /** Ouvre le menu de l'opérateur (code USSD) : le client paie avec son code secret, que l'application ne voit jamais. */
+    private void payerRecharge(Cloud.Portefeuille w) {
+        String digits = rechargeMontant == null ? "" : rechargeMontant.getText().toString().replaceAll("\\D", "");
+        long montant = digits.isEmpty() || digits.length() > 7 ? 0 : Long.parseLong(digits);
+        if (montant < w.rechargeMin) { notice("Indiquez un montant d'au moins " + Tarif.fcfa(w.rechargeMin) + ".", 2); return; }
+        if (montant > 500000) { notice("Montant trop élevé (500 000 FCFA au plus).", 2); return; }
+        boolean om = "OM".equals(rechargeOp);
+        Recharges.Attente a = new Recharges.Attente();
+        a.op = om ? "OM" : "MOMO";
+        a.montant = montant;
+        a.numero = om ? w.numeroOm : w.numeroMomo;
+        a.depuis = System.currentTimeMillis();
+        Cloud.setRechargeAttente(this, a);
+        String code = Recharges.codeUssd(om ? w.ussdOm : w.ussdMomo, a.numero, montant);
+        try {
+            startActivity(new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(code))));
+        } catch (Exception e) {
+            notice("Composez " + code + " sur votre téléphone, puis envoyez " + Tarif.fcfa(montant) + " au " + formatNumero(a.numero) + ".", 0);
+        }
+        render();
+    }
+
+    /** Recharge payée, en attente du SMS de l'opérateur. */
+    private void rechargeEnCours(LinearLayout card, Cloud.Portefeuille w, Recharges.Attente a) {
+        boolean om = "OM".equals(a.op);
+        LinearLayout k = column(6);
+        k.setBackground(box(GOOD_BG, 0, 12));
+        k.setPadding(dp(12), dp(12), dp(12), dp(12));
+        k.addView(label("Paiement en cours · " + (om ? "Orange Money" : "MTN MoMo")));
+        k.addView(text("Dans le menu " + (om ? "Orange Money" : "MoMo") + ", faites un transfert :", 13, INK, false));
+        TextView num = text("Numéro  " + formatNumero(a.numero), 18, om ? OM : MOMO, true);
+        num.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        k.addView(num);
+        TextView mt = text("Montant  " + SmsParser.fmt(a.montant * 100), 18, INK, true);
+        mt.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        k.addView(mt);
+        if (!w.marchand.isEmpty()) k.addView(text("Nom affiché par l'opérateur : " + w.marchand, 12, MUTED, false));
+        k.addView(text("Validez avec votre code secret. Dès que le SMS de confirmation arrive, l'application déclare le paiement "
+                + "toute seule, avec son ID : vous n'avez rien à recopier.", 12, INK, false));
+        LinearLayout act = new LinearLayout(this);
+        act.addView(button("Rouvrir le menu", false, v -> {
+            String code = Recharges.codeUssd(om ? w.ussdOm : w.ussdMomo, a.numero, a.montant);
+            try { startActivity(new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(code)))); } catch (Exception ignored) {}
+        }), weight(false));
+        act.addView(button("Vérifier le SMS", true, v -> { notice("Recherche du SMS de confirmation…", 0); reload(true); }), weight(true));
+        k.addView(act, fill());
+        k.addView(small("Annuler ce paiement", MUTED, v -> { Cloud.setRechargeAttente(this, null); render(); }), fill());
+        card.addView(k, fill());
+    }
+
+    // ---------- Personne (dettes et créances) dans un formulaire ----------
+
+    /** Champ « Personne » et échéance, visibles seulement pour une catégorie de dette ou de créance. */
+    private final class ChampPersonne {
+        final LinearLayout box = column(6);
+        final EditText nom = new EditText(MainActivity.this);
+        final EditText echeance = new EditText(MainActivity.this);
+        final TextView titre = text("", 13, MUTED, false);
+        final TextView echeanceTitre = text("Remboursement prévu le (facultatif)", 13, MUTED, false);
+        String numero;
+
+        ChampPersonne(String nomParDefaut, String numero, Long echeanceParDefaut) {
+            this.numero = numero;
+            nom.setSingleLine(true);
+            nom.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+            nom.setHint("Nom de la personne");
+            if (nomParDefaut != null) nom.setText(nomParDefaut);
+            echeance.setSingleLine(true);
+            echeance.setInputType(InputType.TYPE_CLASS_DATETIME);
+            echeance.setHint("JJ/MM/AAAA");
+            if (echeanceParDefaut != null) echeance.setText(new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE).format(new Date(echeanceParDefaut)));
+            box.addView(titre);
+            box.addView(nom, fill());
+            Dettes.Bilan db = Dettes.calculer(engagements, System.currentTimeMillis());
+            List<String> sug = Dettes.suggestions(db, numero, 4);
+            if (!sug.isEmpty()) {
+                LinearLayout chips = new LinearLayout(MainActivity.this);
+                for (String s : sug) {
+                    TextView c = chip(s, ACCENT, GOOD_BG);
+                    c.setOnClickListener(v -> nom.setText(s));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    lp.setMarginEnd(dp(6));
+                    chips.addView(c, lp);
+                }
+                HorizontalScrollView hs = new HorizontalScrollView(MainActivity.this);
+                hs.addView(chips);
+                box.addView(hs, fill());
+            }
+            box.addView(echeanceTitre);
+            box.addView(echeance, fill());
+        }
+
+        /** La personne est demandée (catégorie de dette et application Dettes & créances active). */
+        boolean requis() {
+            return box.getVisibility() == View.VISIBLE;
+        }
+
+        void maj(String categorie) {
+            Object[] n = actif(Modules.DETTES) ? Dettes.nature(categorie) : null;
+            box.setVisibility(n == null ? View.GONE : View.VISIBLE);
+            if (n == null) return;
+            boolean creance = Dettes.CREANCE.equals(n[0]);
+            boolean hausse = (Integer) n[1] > 0;
+            titre.setText(creance ? (hausse ? "À qui prêtez-vous ?" : "Qui vous rembourse ?") : (hausse ? "Qui vous prête ?" : "Qui remboursez-vous ?"));
+            echeanceTitre.setVisibility(hausse ? View.VISIBLE : View.GONE);
+            echeance.setVisibility(hausse ? View.VISIBLE : View.GONE);
+        }
+
+        String nom() { return nom.getText().toString().trim(); }
+
+        /** Échéance saisie, ou null ; -1 si la date est illisible. */
+        Long echeance() {
+            String s = echeance.getText().toString().trim();
+            if (s.isEmpty() || echeance.getVisibility() != View.VISIBLE) return null;
+            try {
+                SimpleDateFormat f = new SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE);
+                f.setLenient(false);
+                return f.parse(s).getTime() + 20L * 3600 * 1000;
+            } catch (Exception e) {
+                return -1L;
+            }
+        }
+    }
+
+    /**
+     * Après le classement d'une opération (ou une dépense suivie) : crée, met à jour ou retire son mouvement de dette.
+     * À appeler hors du fil d'affichage.
+     */
+    private void majEngagement(Store st, String cleOp, String categorie, String tiers, String numero, long montant, long date, Long echeance, String motif) {
+        if (!actif(Modules.DETTES)) return; // lecture seule : les dettes ne bougent plus
+        String id = Dettes.idPour(cleOp);
+        Object[] n = Dettes.nature(categorie);
+        Dettes.Engagement ex = st.engagement(id);
+        if (n == null || tiers == null || tiers.isEmpty()) {
+            if (ex != null && !ex.annule) { ex.annule = true; st.setEngagement(ex); }
+            return;
+        }
+        Dettes.Engagement e = ex != null ? ex : new Dettes.Engagement();
+        e.id = id;
+        e.cle = cleOp;
+        e.tiers = tiers;
+        e.numero = numero;
+        e.type = (String) n[0];
+        e.sens = (Integer) n[1];
+        e.montant = montant;
+        e.date = date;
+        e.echeance = e.sens > 0 ? echeance : null;
+        e.motif = motif == null ? "" : motif;
+        e.annule = false;
+        st.setEngagement(e);
+    }
+
+    private Dettes.Engagement engagementDe(String cleOp) {
+        String id = Dettes.idPour(cleOp);
+        for (Dettes.Engagement e : engagements) if (e.id.equals(id) && !e.annule) return e;
+        return null;
+    }
+
+    // ---------- Écrans de détail de l'onglet Finances ----------
+
+    /** Ferme un écran de détail (suivi, personne, catégorie) ; vrai s'il y en avait un. */
+    private boolean fermerDetail() {
+        boolean ouvert = suiviOuvert != null || personneOuverte != null || categorieOuverte != null || applicationsOuvert;
+        applicationsOuvert = false;
+        suiviOuvert = null;
+        personneOuverte = null;
+        categorieOuverte = null;
+        return ouvert;
+    }
+
+    private void ouvrirSuivi(String cle) {
+        fermerDetail();
+        suiviOuvert = cle;
+        pageIdx = PAGE_FINANCES;
+        render();
+        scroll.scrollTo(0, 0);
+    }
+
+    private void ouvrirPersonne(String nom) {
+        fermerDetail();
+        personneOuverte = nom;
+        pageIdx = PAGE_FINANCES;
+        render();
+        scroll.scrollTo(0, 0);
+    }
+
+    private void ouvrirCategorie(String cat, int sens) {
+        fermerDetail();
+        categorieOuverte = cat == null ? "" : cat;
+        categorieSens = sens;
+        render();
+        scroll.scrollTo(0, 0);
+    }
+
+    private View retour(String titre) {
+        Button b = small("◂  " + titre, ACCENT, v -> { fermerDetail(); render(); });
+        return b;
+    }
+
+    /** Barre de progression (part utilisée). */
+    private View barre(long fait, long total, int couleur) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setBackground(box(BG, 0, 4));
+        int plein = (int) Math.round(Math.min(1.0, fait / (double) Math.max(1, total)) * 1000);
+        View f = new View(this);
+        f.setBackground(box(couleur, 0, 4));
+        bar.addView(f, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, plein)));
+        bar.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, 1000 - plein)));
+        return bar;
+    }
+
+    // ----- Entrées et sorties par catégorie -----
+
+    private View entreesSortiesCard(Caisse.Bilan b) {
+        LinearLayout c = card();
+        c.addView(text("Entrées et sorties du mois", 16, INK, true));
+        c.addView(text("Par catégorie, tous moyens confondus (OM, MoMo, banques, espèces). Touchez une ligne pour voir les opérations.", 12, MUTED, false));
+        for (int sens : new int[] {1, -1}) {
+            List<Map.Entry<String, Caisse.Total>> lignes = new ArrayList<>();
+            long total = 0;
+            for (Map.Entry<String, Caisse.Total> e : b.totaux.entrySet()) {
+                long v = sens > 0 ? e.getValue().entrees : e.getValue().sorties;
+                if (v <= 0) continue;
+                lignes.add(e);
+                total += v;
+            }
+            final int s = sens;
+            java.util.Collections.sort(lignes, (x, y) -> Long.compare(s > 0 ? y.getValue().entrees : y.getValue().sorties,
+                    s > 0 ? x.getValue().entrees : x.getValue().sorties));
+            LinearLayout head = new LinearLayout(this);
+            head.setPadding(0, dp(8), 0, dp(2));
+            head.addView(label(sens > 0 ? "Entrées" : "Sorties"), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            TextView tt = text((sens > 0 ? "+" : "−") + SmsParser.fmt(total), 13, sens > 0 ? GOOD : INK, true);
+            tt.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+            head.addView(tt);
+            c.addView(head, fill());
+            if (lignes.isEmpty()) { c.addView(text("Aucune " + (sens > 0 ? "entrée" : "sortie") + " ce mois-ci.", 12, MUTED, false)); continue; }
+            for (Map.Entry<String, Caisse.Total> e : lignes) {
+                long v = sens > 0 ? e.getValue().entrees : e.getValue().sorties;
+                LinearLayout r = column(2);
+                r.setPadding(0, dp(5), 0, dp(5));
+                LinearLayout top = new LinearLayout(this);
+                top.setGravity(Gravity.CENTER_VERTICAL);
+                View dot = new View(this);
+                dot.setBackground(box(catColor(e.getKey()), 0, 5));
+                LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(dp(10), dp(10));
+                dl.setMarginEnd(dp(8));
+                top.addView(dot, dl);
+                top.addView(text(Caisse.categorieNom(e.getKey()), 14, e.getKey() == null ? BAD : INK, false),
+                        new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                TextView val = text(SmsParser.fmt(v) + "  " + Math.round(v * 100.0 / Math.max(1, total)) + " %  ›", 13, INK, true);
+                val.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                top.addView(val);
+                r.addView(top, fill());
+                r.addView(barre(v, total, sens > 0 ? GOOD : catColor(e.getKey())), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)));
+                final String cat = e.getKey();
+                r.setOnClickListener(x -> ouvrirCategorie(cat, s));
+                c.addView(r, fill());
+            }
+        }
+        return c;
+    }
+
+    /** Opérations du mois affiché pour une catégorie et un sens. */
+    private void categoriePage() {
+        long now = System.currentTimeMillis();
+        long debut = Finances.debutMois(now, moisDecalage);
+        long fin = moisDecalage == 0 ? now : Finances.debutMois(now, moisDecalage + 1) - 1;
+        String cat = categorieOuverte.isEmpty() ? null : categorieOuverte;
+        page.addView(retour("Finances"));
+        String nomMois = new SimpleDateFormat("MMMM yyyy", Locale.FRANCE).format(new Date(debut));
+        pageTitle(Caisse.categorieNom(cat), (categorieSens > 0 ? "Entrées · " : "Sorties · ") + nomMois);
+        if (result == null) return;
+        Caisse.Bilan b = computeBilan(debut, fin);
+        Caisse.Total t = b.total(cat);
+        long tot = categorieSens > 0 ? t.entrees : t.sorties;
+        TextView big = big((categorieSens > 0 ? "+" : "−") + SmsParser.fmt(tot) + " FCFA");
+        page.addView(big);
+        LinearLayout list = listCard();
+        int n = 0;
+        for (Caisse.Ligne l : b.lignes) {
+            if ((l.sms.sens > 0) != (categorieSens > 0)) continue;
+            String lc = Caisse.REPARTI.equals(l.categorie) ? null : l.categorie;
+            if (cat == null ? lc != null : !cat.equals(lc)) continue;
+            if (Caisse.REPARTI.equals(l.categorie)) continue;
+            list.addView(ligneRow(l, false), fill());
+            n++;
+        }
+        for (Caisse.Saisie s : b.mouvementsEspeces) {
+            if (s.annule || (s.sens > 0) != (categorieSens > 0)) continue;
+            if (cat == null || !cat.equals(Caisse.normaliserSaisie(s.categorie, s.sens))) continue;
+            list.addView(especeRow(s), fill());
+            n++;
+        }
+        for (Caisse.Saisie s : b.depensesSuivies) {
+            if (s.annule || (s.sens > 0) != (categorieSens > 0)) continue;
+            if (cat == null || !cat.equals(Caisse.normaliserSaisie(s.categorie, s.sens))) continue;
+            list.addView(depenseSuivieRow(s), fill());
+            n++;
+        }
+        if (n == 0) list.addView(empty("Aucune opération."));
+        page.addView(list, fill());
+    }
+
+    private View depenseSuivieRow(Caisse.Saisie s) {
+        LinearLayout row = column(3);
+        row.setPadding(0, dp(10), 0, dp(10));
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tl.setMarginEnd(dp(8));
+        top.addView(tag("Suivi", PURPLE), tl);
+        top.addView(text(s.libelle.isEmpty() ? Caisse.categorieNom(Caisse.normaliserSaisie(s.categorie, s.sens)) : s.libelle, 15, INK, true),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView amt = text("−" + SmsParser.fmt(s.montant), 15, INK, true);
+        amt.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        top.addView(amt);
+        row.addView(top, fill());
+        row.addView(text(when(s.date) + " · payé avec un argent suivi", 12, MUTED, false));
+        if (s.source != null) row.setOnClickListener(v -> ouvrirSuivi(s.source));
+        row.addView(divider());
+        return row;
+    }
+
+    // ----- Suivi de l'argent -----
+
+    private List<Suivi.Source> sourcesSuivies() {
+        return Suivi.sources(result, saisies, liens, classements);
+    }
+
+    private void ajouterSuiviEtDettes(Finances.Tresorerie tr) {
+        if (visible(Modules.SUIVI)) {
+            if (!actif(Modules.SUIVI)) page.addView(bandeauLecture(Modules.SUIVI), fill());
+            page.addView(suiviCard(), fill());
+        } else {
+            page.addView(promoModule(Modules.SUIVI, "Salaire ou argent reçu : suivez ce que vous en faites jusqu'au dernier franc. Répartissez un retrait en dépenses avec le reste à justifier."), fill());
+        }
+        if (visible(Modules.DETTES)) {
+            if (!actif(Modules.DETTES)) page.addView(bandeauLecture(Modules.DETTES), fill());
+            page.addView(dettesCard(tr), fill());
+        } else {
+            page.addView(promoModule(Modules.DETTES, "Qui vous doit, à qui vous devez, combien et pour quand : prêts, emprunts et remboursements par personne, avec les retards."), fill());
+        }
+    }
+
+    private View suiviCard() {
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("Suivi de l'argent", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(small("+ Suivre", ACCENT, v -> choisirSource()));
+        c.addView(head, fill());
+        List<Suivi.Source> src = sourcesSuivies();
+        if (src.isEmpty()) {
+            c.addView(text("Salaire reçu, retrait, gros transfert : suivez ce que vous en faites, dépense par dépense, et voyez ce qui reste. "
+                    + "Touchez « + Suivre », ou ouvrez une opération et choisissez « Suivre cet argent ».", 13, MUTED, false));
+            return c;
+        }
+        int n = 0;
+        for (Suivi.Source s : src) {
+            if (n++ >= 5) break;
+            c.addView(sourceRow(s), fill());
+        }
+        if (src.size() > 5) c.addView(text("+ " + (src.size() - 5) + " autre(s) suivi(s) plus ancien(s)", 12, MUTED, false));
+        return c;
+    }
+
+    private View sourceRow(Suivi.Source s) {
+        LinearLayout r = column(3);
+        r.setPadding(0, dp(6), 0, dp(6));
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(text((s.sens > 0 ? "+" : "−") + SmsParser.fmt(s.montant) + " · " + s.libelle, 14, INK, true),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        top.addView(text("›", 16, MUTED, true));
+        r.addView(top, fill());
+        boolean depasse = s.reste() < 0;
+        r.addView(barre(s.utilise, s.montant, depasse ? BAD : s.reste() == 0 ? GOOD : PURPLE),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)));
+        String resteNom = Suivi.repartition(s) ? "reste à justifier " : "reste ";
+        r.addView(text(when(s.date).substring(0, 10) + " · utilisé " + SmsParser.fmt(s.utilise) + " · "
+                + (depasse ? "dépassé de " + SmsParser.fmt(-s.reste()) : resteNom + SmsParser.fmt(s.reste())), 12, depasse ? BAD : MUTED, depasse));
+        r.setOnClickListener(v -> ouvrirSuivi(s.cle));
+        return r;
+    }
+
+    /** Choix d'un argent à suivre : entrées et sorties récentes (SMS et espèces), les plus grosses en premier. */
+    private void choisirSource() {
+        if (result == null || !exiger(Modules.SUIVI)) return;
+        LinearLayout list = column(4);
+        list.setPadding(dp(16), dp(8), dp(16), 0);
+        list.addView(text("Opérations des 60 derniers jours, les plus importantes d'abord.", 12, MUTED, false));
+        long depuis = System.currentTimeMillis() - 60L * 24 * 3600 * 1000;
+        List<Object[]> ops = new ArrayList<>();
+        for (Txn t : result.tx) {
+            if (t.isBalanceCheck() || t.date < depuis) continue;
+            if (liens.containsKey(Caisse.cle(t))) continue;
+            ops.add(new Object[] {t.montant, t});
+        }
+        for (Caisse.Saisie s : saisies) {
+            if (s.annule || s.uid == null || !Caisse.ESPECES.equals(s.mode) || s.sens <= 0 || s.date < depuis) continue;
+            if (liens.containsKey(Suivi.cle(s))) continue;
+            ops.add(new Object[] {s.montant, s});
+        }
+        java.util.Collections.sort(ops, (a, b) -> Long.compare((Long) b[0], (Long) a[0]));
+        final AlertDialog[] dlg = new AlertDialog[1];
+        int n = 0;
+        for (Object[] o : ops) {
+            if (n++ >= 25) break;
+            String cle, titre, detail;
+            if (o[1] instanceof Txn) {
+                Txn t = (Txn) o[1];
+                cle = Caisse.cle(t);
+                String qui = t.nom != null ? t.nom : t.numero;
+                titre = (t.sens > 0 ? "+" : "−") + SmsParser.fmt(t.montant) + " · " + t.typeLabel();
+                detail = opShort(t.op) + " · " + when(t.date) + (qui != null ? " · " + qui : "");
+            } else {
+                Caisse.Saisie s = (Caisse.Saisie) o[1];
+                cle = Suivi.cle(s);
+                titre = "+" + SmsParser.fmt(s.montant) + " · Espèces";
+                detail = when(s.date) + (s.libelle.isEmpty() ? "" : " · " + s.libelle);
+            }
+            LinearLayout r = column(1);
+            r.setPadding(dp(10), dp(8), dp(10), dp(8));
+            r.setBackground(box(SURFACE, LINE, 10));
+            r.addView(text(titre, 14, INK, true));
+            r.addView(text(detail, 12, MUTED, false));
+            final String k = cle;
+            r.setOnClickListener(v -> { if (dlg[0] != null) dlg[0].dismiss(); commencerSuivi(k); });
+            list.addView(r, fill());
+        }
+        if (ops.isEmpty()) list.addView(text("Aucune opération récente.", 13, MUTED, false));
+        ScrollView sv = new ScrollView(this);
+        sv.addView(list, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        dlg[0] = new AlertDialog.Builder(this).setTitle("Quel argent suivre ?").setView(sv).setNegativeButton("Fermer", null).show();
+    }
+
+    private void commencerSuivi(String cle) {
+        if (!exiger(Modules.SUIVI)) return;
+        io.execute(() -> {
+            Store st = Store.get(this);
+            if (!cle.equals(st.liens().get(cle))) st.setLien(cle, cle);
+            SyncJob.soon(this);
+            Map<String, String> l = st.liens();
+            runOnUiThread(() -> { liens = l; ouvrirSuivi(cle); });
+        });
+    }
+
+    private void suiviPage() {
+        page.addView(retour("Finances"));
+        Suivi.Source s = Suivi.trouver(sourcesSuivies(), suiviOuvert);
+        if (s == null) {
+            pageTitle("Suivi de l'argent", null);
+            page.addView(empty("Cette opération n'est pas sur ce téléphone, ou son suivi a été arrêté."));
+            return;
+        }
+        boolean rep = Suivi.repartition(s);
+        pageTitle(rep ? "Répartir cette sortie" : "Suivre cet argent", s.libelle);
+
+        LinearLayout h = column(6);
+        h.setBackground(box(ACCENT, 0, 18));
+        h.setPadding(dp(18), dp(16), dp(18), dp(16));
+        TextView lab = text((rep ? "SORTIE DU " : "REÇU LE ") + when(s.date).toUpperCase(Locale.FRANCE), 11, ON_ACCENT_SOFT, true);
+        lab.setLetterSpacing(0.05f);
+        h.addView(lab);
+        TextView tot = text(SmsParser.fmt(s.montant) + " FCFA", 28, Color.WHITE, true);
+        tot.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        h.addView(tot);
+        if (s.categorie != null) h.addView(text("Catégorie : " + Caisse.categorieNom(s.categorie), 12, ON_ACCENT_SOFT, false));
+        h.addView(barre(s.utilise, s.montant, Color.WHITE), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(8)));
+        LinearLayout chiffres = new LinearLayout(this);
+        LinearLayout u = column(0);
+        u.addView(text("Utilisé", 11, ON_ACCENT_SOFT, false));
+        u.addView(text(SmsParser.fmt(s.utilise), 16, Color.WHITE, true));
+        chiffres.addView(u, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout rs = column(0);
+        rs.addView(text(s.reste() < 0 ? "Dépassé de" : rep ? "Reste à justifier" : "Reste disponible", 11, ON_ACCENT_SOFT, false));
+        rs.addView(text(SmsParser.fmt(Math.abs(s.reste())), 16, Color.WHITE, true));
+        chiffres.addView(rs, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        h.addView(chiffres, fill());
+        page.addView(h, fill());
+
+        LinearLayout act = new LinearLayout(this);
+        act.addView(button("+ Dépense", true, v -> ajouterDepenseSuivie(s)), weight(false));
+        act.addView(button("Rattacher une opération", false, v -> rattacher(s)), weight(true));
+        page.addView(act, fill());
+        page.addView(text(rep
+                ? "Chaque dépense remplace une part de cette sortie dans vos totaux (transport, salaire, prêt à quelqu'un…). "
+                  + "Le reste garde la catégorie de la sortie ; sans catégorie, il reste « À classer »."
+                : "Ajoutez ce que vous avez payé avec cet argent (en espèces par exemple), ou rattachez une sortie déjà enregistrée "
+                  + "(transfert OM, retrait, paiement en espèces).", 12, MUTED, false));
+
+        LinearLayout list = listCard();
+        TextView t = text("Utilisations", 16, INK, true);
+        t.setPadding(0, dp(10), 0, dp(4));
+        list.addView(t);
+        if (s.usages.isEmpty()) list.addView(empty("Aucune utilisation pour l'instant."));
+        for (Suivi.Usage x : s.usages) list.addView(usageRow(s, x), fill());
+        page.addView(list, fill());
+        if (s.usages.isEmpty()) {
+            page.addView(small("Arrêter ce suivi", MUTED, v -> io.execute(() -> {
+                Store.get(this).setLien(s.cle, null);
+                SyncJob.soon(this);
+                runOnUiThread(() -> { fermerDetail(); reload(false); });
+            })), fill());
+        }
+    }
+
+    private View usageRow(Suivi.Source src, Suivi.Usage x) {
+        LinearLayout row = column(2);
+        row.setPadding(0, dp(9), 0, dp(9));
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tl.setMarginEnd(dp(8));
+        top.addView(tag(x.depense ? "Dépense" : x.sms != null ? opShort(x.sms.op) : "Espèces", x.depense ? PURPLE : x.sms != null ? opColor(x.sms.op) : CASH), tl);
+        String titre = x.depense ? (x.libelle == null || x.libelle.isEmpty() ? Caisse.categorieNom(x.categorie) : x.libelle) : x.libelle;
+        top.addView(text(titre, 14, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView m = text("−" + SmsParser.fmt(x.montant), 14, INK, true);
+        m.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        top.addView(m);
+        row.addView(top, fill());
+        LinearLayout bas = new LinearLayout(this);
+        bas.setGravity(Gravity.CENTER_VERTICAL);
+        Dettes.Engagement e = engagementDe(x.cle);
+        bas.addView(text(when(x.date) + " · " + Caisse.categorieNom(x.categorie) + (e != null ? " · " + e.tiers : ""), 12, MUTED, false),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        bas.addView(small(x.depense ? "Retirer" : "Détacher", BAD, v -> io.execute(() -> {
+            Store st = Store.get(this);
+            if (x.depense) {
+                st.annulerSaisie(x.saisie.id);
+                majEngagement(st, x.cle, null, null, null, 0, 0, null, null);
+            } else {
+                st.setLien(x.cle, null);
+            }
+            SyncJob.soon(this);
+            runOnUiThread(() -> reload(false));
+        })));
+        row.addView(bas, fill());
+        row.addView(divider());
+        return row;
+    }
+
+    /** Dépense payée avec l'argent suivi : catégorie de sortie, montant (le reste par défaut), motif, personne si prêt. */
+    private void ajouterDepenseSuivie(Suivi.Source src) {
+        if (!exiger(Modules.SUIVI)) return;
+        LinearLayout form = column(10);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        form.addView(text("Montant (FCFA)", 13, MUTED, false));
+        EditText montant = amountField("ex. 10000");
+        if (src.reste() > 0) montant.setText(String.valueOf(src.reste() / 100));
+        form.addView(montant, fill());
+        final String[] cat = {null};
+        form.addView(text("Catégorie de la dépense", 13, MUTED, false));
+        LinearLayout grille = column(6);
+        TextView aide = text("", 12, MUTED, false);
+        ChampPersonne pers = new ChampPersonne(null, null, null);
+        categorieGrid(grille, aide, -1, cat, () -> pers.maj(cat[0]));
+        form.addView(grille, fill());
+        form.addView(aide);
+        form.addView(pers.box, fill());
+        pers.maj(cat[0]);
+        EditText motif = new EditText(this);
+        motif.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        motif.setHint("Motif (ex. Taxi pour le marché)");
+        form.addView(motif, fill());
+        ScrollView sv = new ScrollView(this);
+        sv.addView(form, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle(Suivi.repartition(src) ? "Part de la sortie" : "Dépense payée avec cet argent")
+                .setView(sv)
+                .setPositiveButton("Enregistrer", (d, w) -> {
+                    Long cents = SmsParser.money(montant.getText().toString());
+                    if (cents == null || cents <= 0) { notice("Montant invalide : dépense non enregistrée.", 2); return; }
+                    if (cat[0] == null) { notice("Choisissez la catégorie de la dépense.", 2); return; }
+                    if (pers.requis() && pers.nom().isEmpty()) { notice("Indiquez la personne.", 2); return; }
+                    Long ech = pers.echeance();
+                    if (ech != null && ech < 0) { notice("Date de remboursement illisible : écrivez JJ/MM/AAAA.", 2); return; }
+                    Caisse.Saisie s = new Caisse.Saisie();
+                    // Une part de sortie garde la date de la sortie (les totaux du mois restent justes) ; une dépense
+                    // payée avec un salaire est datée d'aujourd'hui.
+                    s.date = Suivi.repartition(src) ? src.date : System.currentTimeMillis();
+                    s.mode = Caisse.SUIVI;
+                    s.sens = -1;
+                    s.montant = cents;
+                    s.categorie = cat[0];
+                    s.libelle = motif.getText().toString().trim();
+                    s.source = src.cle;
+                    final String nomP = pers.nom();
+                    io.execute(() -> {
+                        Store st = Store.get(this);
+                        st.addSaisie(s);
+                        majEngagement(st, Suivi.cle(s), cat[0], nomP, null, cents, s.date, ech, s.libelle);
+                        SyncJob.soon(this);
+                        runOnUiThread(() -> { notice("Dépense de " + SmsParser.fmt(cents) + " FCFA ajoutée au suivi.", 1); reload(false); });
+                    });
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void rattacher(Suivi.Source src) {
+        if (!exiger(Modules.SUIVI)) return;
+        List<Suivi.Usage> ops = Suivi.rattachables(src, result, saisies, liens, 30);
+        LinearLayout list = column(4);
+        list.setPadding(dp(16), dp(8), dp(16), 0);
+        list.addView(text("Sorties depuis le " + when(src.date).substring(0, 10) + ", pas encore rattachées.", 12, MUTED, false));
+        final AlertDialog[] dlg = new AlertDialog[1];
+        for (Suivi.Usage u : ops) {
+            LinearLayout r = column(1);
+            r.setPadding(dp(10), dp(8), dp(10), dp(8));
+            r.setBackground(box(SURFACE, LINE, 10));
+            r.addView(text("−" + SmsParser.fmt(u.montant) + " · " + u.libelle, 14, INK, true));
+            Caisse.Classement c = u.sms != null ? classements.get(u.cle) : null;
+            String cat = u.sms != null ? (c != null ? Caisse.categorieNom(Caisse.normaliser(c.categorie, -1)) : "À classer") : Caisse.categorieNom(u.categorie);
+            r.addView(text(when(u.date) + " · " + cat, 12, MUTED, false));
+            r.setOnClickListener(v -> {
+                if (dlg[0] != null) dlg[0].dismiss();
+                io.execute(() -> {
+                    Store.get(this).setLien(u.cle, src.cle);
+                    SyncJob.soon(this);
+                    runOnUiThread(() -> reload(false));
+                });
+            });
+            list.addView(r, fill());
+        }
+        if (ops.isEmpty()) list.addView(text("Aucune sortie à rattacher.", 13, MUTED, false));
+        ScrollView sv = new ScrollView(this);
+        sv.addView(list, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        dlg[0] = new AlertDialog.Builder(this).setTitle("Rattacher une opération").setView(sv).setNegativeButton("Fermer", null).show();
+    }
+
+    // ----- Dettes et créances -----
+
+    private View dettesCard(Finances.Tresorerie tr) {
+        long now = System.currentTimeMillis();
+        Dettes.Bilan d = Dettes.calculer(engagements, now);
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("Dettes et créances", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(small("+ Ajouter", ACCENT, v -> nouvelEngagement(null, 0)));
+        c.addView(head, fill());
+        LinearLayout tot = new LinearLayout(this);
+        LinearLayout a = column(0);
+        a.addView(label("On me doit"));
+        TextView av = text(SmsParser.fmt(d.onMeDoit), 18, GOOD, true);
+        av.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        a.addView(av);
+        tot.addView(a, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout b = column(0);
+        b.addView(label("Je dois"));
+        TextView bv = text(SmsParser.fmt(d.jeDois), 18, d.jeDois > 0 ? BAD : INK, true);
+        bv.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        b.addView(bv);
+        tot.addView(b, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        c.addView(tot, fill());
+        if (d.enRetard > 0) {
+            TextView r = text("⚠  " + d.enRetard + " remboursement(s) en retard", 13, BAD, true);
+            r.setBackground(box(BAD_BG, 0, 10));
+            r.setPadding(dp(10), dp(6), dp(10), dp(6));
+            c.addView(r, fill());
+        }
+        if (d.personnes.isEmpty()) {
+            c.addView(text("Classez une sortie en « Prêt accordé » ou « Remboursement de dette », une entrée en « Emprunt » ou "
+                    + "« Remboursement reçu », et indiquez la personne : les soldes se calculent seuls. Une dette ancienne se saisit avec « + Ajouter ».", 13, MUTED, false));
+            return c;
+        }
+        int n = 0;
+        for (Dettes.Personne p : d.personnes) {
+            if (p.soldee() || n >= 6) continue;
+            c.addView(personneRow(p, now), fill());
+            n++;
+        }
+        long soldees = 0;
+        for (Dettes.Personne p : d.personnes) if (p.soldee()) soldees++;
+        c.addView(small("Toutes les personnes (" + d.personnes.size() + (soldees > 0 ? ", dont " + soldees + " soldée(s)" : "") + ")  ›", ACCENT,
+                v -> ouvrirPersonne("")), fill());
+        c.addView(divider());
+        if (tr != null) {
+            long net = tr.total + d.onMeDoit - d.jeDois;
+            c.addView(kvSmall("Trésorerie + on me doit − je dois", (net < 0 ? "−" : "") + SmsParser.fmt(Math.abs(net)) + " FCFA"));
+        }
+        return c;
+    }
+
+    private View personneRow(Dettes.Personne p, long now) {
+        LinearLayout r = column(2);
+        r.setPadding(0, dp(7), 0, dp(7));
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(text(p.nom, 14, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        long net = p.net();
+        TextView v = text(p.soldee() ? "soldé" : (net > 0 ? "me doit " : "je dois ") + SmsParser.fmt(Math.abs(net)) + "  ›", 13,
+                p.soldee() ? MUTED : net > 0 ? GOOD : BAD, true);
+        top.addView(v);
+        r.addView(top, fill());
+        String info = "dernier mouvement " + when(p.derniere).substring(0, 10);
+        if (p.echeance != null) info = (p.enRetard(now) ? "⚠ en retard depuis le " : "à rembourser avant le ") + when(p.echeance).substring(0, 10);
+        r.addView(text(info, 12, p.enRetard(now) ? BAD : MUTED, p.enRetard(now)));
+        r.setOnClickListener(x -> ouvrirPersonne(p.nom));
+        return r;
+    }
+
+    private void personnePage() {
+        long now = System.currentTimeMillis();
+        Dettes.Bilan d = Dettes.calculer(engagements, now);
+        page.addView(retour("Finances"));
+        if (personneOuverte.isEmpty()) {
+            pageTitle("Dettes et créances", "On me doit " + SmsParser.fmt(d.onMeDoit) + " · je dois " + SmsParser.fmt(d.jeDois));
+            page.addView(button("+ Ajouter une dette ou une créance", true, v -> nouvelEngagement(null, 0)), fill());
+            LinearLayout l = listCard();
+            if (d.personnes.isEmpty()) l.addView(empty("Aucune dette ni créance."));
+            for (Dettes.Personne p : d.personnes) { l.addView(personneRow(p, now), fill()); l.addView(divider()); }
+            page.addView(l, fill());
+            return;
+        }
+        Dettes.Personne p = d.personne(personneOuverte);
+        if (p == null) { pageTitle(personneOuverte, null); page.addView(empty("Plus aucun mouvement avec cette personne.")); return; }
+        pageTitle(p.nom, p.numero != null ? formatNumero(p.numero) : null);
+        long net = p.net();
+        LinearLayout h = column(4);
+        h.setBackground(box(p.soldee() ? SURFACE : net > 0 ? GOOD_BG : BAD_BG, p.soldee() ? LINE : 0, 16));
+        h.setPadding(dp(16), dp(14), dp(16), dp(14));
+        h.addView(label(p.soldee() ? "Compte soldé" : net > 0 ? "Cette personne vous doit" : "Vous lui devez"));
+        TextView big = text(SmsParser.fmt(Math.abs(net)) + " FCFA", 26, p.soldee() ? MUTED : net > 0 ? GOOD : BAD, true);
+        big.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        h.addView(big);
+        if (p.echeance != null) h.addView(text((p.enRetard(now) ? "⚠  Remboursement prévu le " : "Remboursement prévu le ")
+                + when(p.echeance).substring(0, 10), 13, p.enRetard(now) ? BAD : INK, p.enRetard(now)));
+        page.addView(h, fill());
+
+        LinearLayout act = new LinearLayout(this);
+        act.addView(button(net >= 0 ? "Il/elle me rembourse" : "Je rembourse", true, v -> nouvelEngagement(p.nom, net >= 0 ? 3 : 5)), weight(false));
+        act.addView(button("Autre mouvement", false, v -> nouvelEngagement(p.nom, net >= 0 ? 2 : 4)), weight(true));
+        page.addView(act, fill());
+        page.addView(text("Un remboursement par OM ou MoMo se fait en classant le SMS (« Remboursement reçu » ou « Remboursement de dette ») "
+                + "avec le nom de cette personne. Les boutons ci-dessus servent aux espèces et aux dettes anciennes.", 12, MUTED, false));
+
+        LinearLayout l = listCard();
+        TextView t = text("Historique", 16, INK, true);
+        t.setPadding(0, dp(10), 0, dp(4));
+        l.addView(t);
+        for (Dettes.Engagement e : p.mouvements) {
+            LinearLayout r = column(2);
+            r.setPadding(0, dp(8), 0, dp(8));
+            LinearLayout top = new LinearLayout(this);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            top.addView(text(Dettes.libelle(e), 14, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            boolean augmente = e.sens > 0;
+            boolean bonPourMoi = Dettes.CREANCE.equals(e.type) != augmente; // remboursement reçu ou dette qui baisse
+            TextView m = text((augmente ? "+" : "−") + SmsParser.fmt(e.montant), 14,
+                    bonPourMoi ? GOOD : INK, true);
+            m.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+            top.addView(m);
+            r.addView(top, fill());
+            String src = e.cle == null ? "saisie à la main" : e.cle.startsWith("S|") ? "espèces ou dépense suivie" : opShort(e.cle.substring(0, e.cle.indexOf('|')));
+            r.addView(text(when(e.date) + " · " + src + (e.motif == null || e.motif.isEmpty() ? "" : " · " + e.motif)
+                    + (e.echeance != null ? " · échéance " + when(e.echeance).substring(0, 10) : ""), 12, MUTED, false));
+            if (e.cle == null) r.setOnClickListener(v -> supprimerEngagement(e));
+            l.addView(r, fill());
+            l.addView(divider());
+        }
+        page.addView(l, fill());
+    }
+
+    private void supprimerEngagement(Dettes.Engagement e) {
+        new AlertDialog.Builder(this)
+                .setTitle("Supprimer ce mouvement ?")
+                .setMessage(Dettes.libelle(e) + " · " + SmsParser.fmt(e.montant) + " FCFA · " + e.tiers)
+                .setPositiveButton("Supprimer", (d, w) -> io.execute(() -> {
+                    e.annule = true;
+                    Store.get(this).setEngagement(e);
+                    SyncJob.soon(this);
+                    runOnUiThread(() -> reload(false));
+                }))
+                .setNegativeButton("Garder", null)
+                .show();
+    }
+
+    /**
+     * Nouveau mouvement saisi à la main : dette ou créance ancienne (sans mouvement d'argent), ou prêt / remboursement
+     * en espèces (enregistré aussi dans la caisse espèces).
+     */
+    private void nouvelEngagement(String nomParDefaut, int defaut) {
+        if (!exiger(Modules.DETTES)) return;
+        final String[][] choix = {
+                {"Il/elle me doit déjà (dette ancienne)", Dettes.CREANCE, "1", null},
+                {"Je lui dois déjà (dette ancienne)", Dettes.DETTE, "1", null},
+                {"Je lui prête en espèces", Dettes.CREANCE, "1", Caisse.PRET_ACCORDE},
+                {"Il/elle me rembourse en espèces", Dettes.CREANCE, "-1", Caisse.REMB_RECU},
+                {"Il/elle me prête en espèces", Dettes.DETTE, "1", Caisse.PRET_RECU},
+                {"Je le/la rembourse en espèces", Dettes.DETTE, "-1", Caisse.REMB_PRET},
+        };
+        LinearLayout form = column(8);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        ChampPersonne pers = new ChampPersonne(nomParDefaut, null, null);
+        pers.titre.setText("Personne");
+        form.addView(pers.box, fill());
+        final int[] k = {defaut};
+        LinearLayout opts = column(4);
+        Runnable[] peindre = new Runnable[1];
+        peindre[0] = () -> {
+            opts.removeAllViews();
+            for (int i = 0; i < choix.length; i++) {
+                final int j = i;
+                boolean on = i == k[0];
+                TextView o = text((on ? "●  " : "○  ") + choix[i][0], 14, on ? ACCENT : INK, on);
+                o.setPadding(dp(10), dp(8), dp(10), dp(8));
+                o.setBackground(box(on ? GOOD_BG : SURFACE, on ? ACCENT : LINE, 10));
+                o.setOnClickListener(v -> { k[0] = j; peindre[0].run(); });
+                opts.addView(o, fill());
+            }
+            boolean hausse = "1".equals(choix[k[0]][2]);
+            pers.echeanceTitre.setVisibility(hausse ? View.VISIBLE : View.GONE);
+            pers.echeance.setVisibility(hausse ? View.VISIBLE : View.GONE);
+        };
+        peindre[0].run();
+        form.addView(opts, fill());
+        form.addView(text("Montant (FCFA)", 13, MUTED, false));
+        EditText montant = amountField("ex. 20000");
+        form.addView(montant, fill());
+        EditText motif = new EditText(this);
+        motif.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        motif.setHint("Motif (facultatif)");
+        form.addView(motif, fill());
+        ScrollView sv = new ScrollView(this);
+        sv.addView(form, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle("Dette ou créance")
+                .setView(sv)
+                .setPositiveButton("Enregistrer", (d, w) -> {
+                    String nom = pers.nom();
+                    Long cents = SmsParser.money(montant.getText().toString());
+                    if (nom.isEmpty()) { notice("Indiquez la personne.", 2); return; }
+                    if (cents == null || cents <= 0) { notice("Montant invalide.", 2); return; }
+                    Long ech = pers.echeance();
+                    if (ech != null && ech < 0) { notice("Date de remboursement illisible : écrivez JJ/MM/AAAA.", 2); return; }
+                    String[] c = choix[k[0]];
+                    String m = motif.getText().toString().trim();
+                    long now = System.currentTimeMillis();
+                    io.execute(() -> {
+                        Store st = Store.get(this);
+                        if (c[3] == null) {
+                            Dettes.Engagement e = new Dettes.Engagement();
+                            e.id = java.util.UUID.randomUUID().toString();
+                            e.tiers = nom;
+                            e.type = c[1];
+                            e.sens = 1;
+                            e.montant = cents;
+                            e.date = now;
+                            e.echeance = ech;
+                            e.motif = m;
+                            st.setEngagement(e);
+                        } else {
+                            Caisse.Saisie s = new Caisse.Saisie();
+                            s.date = now;
+                            s.mode = Caisse.ESPECES;
+                            s.sens = Caisse.sensDe(c[3]);
+                            s.montant = cents;
+                            s.categorie = c[3];
+                            s.libelle = (m.isEmpty() ? Caisse.categorieNom(c[3]) : m) + " · " + nom;
+                            st.addSaisie(s);
+                            majEngagement(st, Suivi.cle(s), c[3], nom, null, cents, now, ech, m);
+                        }
+                        SyncJob.soon(this);
+                        runOnUiThread(() -> { notice("Enregistré pour " + nom + ".", 1); personneOuverte = nom; reload(false); });
+                    });
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
     }
 
     // ---------- Export Excel ----------
@@ -3053,7 +4650,8 @@ public class MainActivity extends Activity {
             notice("Solde insuffisant : il manque " + Tarif.fcfa(d.manque) + ". Rechargez votre porte-monnaie.", 2);
             return;
         }
-        String detail = d.offert ? "Cet export vous est offert."
+        String detail = d.inclus ? "Export inclus avec Finances & budgets : rien n'est débité."
+                : d.offert ? "Cet export vous est offert."
                 : d.prix == 0 ? "Export gratuit (aucune opération sur la période)."
                 : Tarif.fcfa(d.prix) + " seront débités de votre porte-monnaie.\nSolde après l'export : " + Tarif.fcfa(d.soldeApres) + ".";
         new AlertDialog.Builder(this)
@@ -3104,13 +4702,15 @@ public class MainActivity extends Activity {
                 // 2. Écriture du fichier.
                 byte[] xlsx = toutes ? Exporter.consolide(vue, label, System.currentTimeMillis())
                         : Exporter.xlsx(r, b, range[0], range[1], label, maintenant,
-                                Finances.tresorerie(r, especesJour, Store.get(this).avoirs()), Store.get(this).budgets());
+                                Finances.tresorerie(r, especesJour, Store.get(this).avoirs()), Store.get(this).budgets(),
+                                Dettes.calculer(Store.get(this).engagements(), maintenant));
                 try (OutputStream os = getContentResolver().openOutputStream(uri)) {
                     os.write(xlsx);
                 }
                 msg = "Rapport Excel enregistré · " + label + ".";
                 if (debit != null) {
-                    if (debit.offert) msg += " Export offert.";
+                    if (debit.inclus) msg += " Inclus avec Finances & budgets.";
+                    else if (debit.offert) msg += " Export offert.";
                     else if (debit.prix > 0) msg += " " + Tarif.fcfa(debit.prix) + " débités · solde " + Tarif.fcfa(debit.solde) + ".";
                     if (debit.horsLigne) msg += " Débit transmis au retour du réseau.";
                 }
