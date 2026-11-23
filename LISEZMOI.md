@@ -2,6 +2,70 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Version 0.14 : forfaits modulables et promotions
+
+**Forfaits réglables par le superadmin** (tableau de bord → onglet Applications) :
+- **Modifier** chaque application ou pack : nom, description, prix par mois, prix par an, ordre d'affichage, présence au catalogue.
+- **Packs** :
+  - **créer** un pack (« Nouveau pack », code `PACK_…`) ;
+  - **composer** son contenu (au moins deux applications) et son nombre de téléphones ;
+  - **supprimer** un pack : s'il a des abonnés, il est seulement retiré du catalogue et ils le gardent jusqu'à la fin de leur période.
+- **Formule annuelle** : un prix par an rend l'abonnement annuel possible. Il est payé en une fois, sans essai, et renouvelé chaque année.
+- **Quotas et limites** : jours d'essai, questions à l'assistant IA par mois, SMS lus par l'IA par mois, messages WhatsApp par 24 h.
+
+**Promotions** (nouvel onglet Promotions) :
+- **Pour qui** :
+  - un **code promo** à saisir ;
+  - des **comptes choisis** ;
+  - un **groupe** : nouveaux comptes, sans application active, anciens abonnés, inactifs depuis 30 jours ;
+  - **tous** les clients.
+- **Réduction** :
+  - **pourcentage** ;
+  - **montant fixe** en moins ;
+  - **prix spécial** ;
+  - **jours offerts**, par code promo, pour une application ;
+  - **bonus de recharge** : +X % sur les recharges dès un montant.
+- **Durée** : un nombre de mois choisi (ou de recharges, pour un bonus). Une date de début et de fin, ainsi qu'un nombre maximum de clients, sont possibles.
+- **Suivi** : utilisations, clients et total accordé pour chaque promotion. Bouton « Arrêter ».
+- **Règle de calcul** : la meilleure réduction ouverte s'applique toute seule au paiement, puis le prix normal revient une fois la durée écoulée.
+
+**Dans l'application** (Compte → Applications) :
+- Les prix affichent « 1 400 FCFA/mois au lieu de 2 000 FCFA ».
+- Un encadré « Vos promotions » apparaît quand une promotion est ouverte.
+- Un champ « J'ai un code promo » permet de saisir un code.
+- Le bouton « Passer à l'année » propose la formule annuelle et affiche l'économie.
+- Dans l'écran de recharge, le bonus est annoncé, et calculé au fur et à mesure de la saisie du montant.
+
+> Serveur : `supabase/promotions.sql` est déjà installé sur Supabase. Rien d'autre à faire.
+
+## Version 0.13 : agent IA
+
+**Nouveau SMS lu** : « Votre carte prépayée virtuelle a été rechargée de … XAF. Nouveau solde : … XAF » est une sortie Orange Money (vers la carte), et le nouveau solde est celui du compte OM.
+
+**Gratuit pour tous** :
+- **Lecture des SMS inconnus par l'IA** :
+  - À chaque synchronisation, 3 SMS inconnus récents au plus sont envoyés, **masqués** (numéros, noms et ID remplacés), à l'IA (Claude, d'Anthropic).
+  - L'IA propose une règle de lecture, que le serveur vérifie sur l'exemple, puis que le téléphone revérifie sur le vrai SMS. La règle sert aussitôt à ce compte.
+  - Une fois **validée** dans le tableau de bord (onglet IA), elle sert à tous les téléphones.
+  - Bouton « Faire lire ce SMS par l'IA » dans À vérifier. Limite : 100 SMS par mois et par compte.
+- **Détection des faux SMS de paiement**, sur le téléphone, sans réseau :
+  - Un SMS « vous avez reçu … FCFA » envoyé par un numéro ordinaire, ou par un expéditeur inconnu qui se dit Orange Money ou MoMo, déclenche une notification « ne livrez pas ». Un bandeau rouge reste 48 heures dans la Caisse.
+
+**Application « Assistant IA »** : 500 FCFA par mois, 14 jours d'essai, 300 questions par mois, incluse dans le Pack Entreprise.
+- **Classement automatique** :
+  - Les propositions sont apprises sur le téléphone à partir de vos classements (même contact, même type, même montant).
+  - Chaque opération à classer affiche « ✨ Vente · 92 % · Accepter ».
+  - « Tout accepter ≥ 90 % » classe d'un coup les propositions les plus sûres.
+  - « Proposer avec l'IA » complète les contacts nouveaux (1 question pour 40 opérations au plus).
+- **Assistant qui répond** (Finances → Assistant IA), en français, sur vos totaux :
+  - **Ce que l'IA voit** : le jour, les 7 derniers jours, les 3 derniers mois, la trésorerie, les budgets, les dettes et l'argent suivi.
+  - **Masquage** : clients et personnes sont remplacés par « Client 1 », « Personne 2 », puis les vrais noms sont remis sur le téléphone.
+  - **Jamais envoyé** : les SMS et les numéros.
+
+**Tableau de bord** : onglet **IA** pour valider ou refuser les règles proposées, et voir la consommation du mois.
+
+> Serveur : `supabase/ia.sql` et la fonction `supabase/functions/ia` sont déjà installés. À faire : ajouter le secret **ANTHROPIC_API_KEY** (clé créée sur console.anthropic.com) dans Supabase → Edge Functions → Secrets.
+
 ## Version 0.12 : Alertes WhatsApp
 
 Nouvelle application **Alertes WhatsApp** : 200 FCFA par mois, 14 jours d'essai, incluse dans le Pack Entreprise.

@@ -49,6 +49,11 @@ public final class Analyzer {
         public int hits, misses;
 
         static String versionFor(String owner) { return SmsParser.RULES_VERSION + "|" + (owner == null ? "" : owner); }
+
+        /** Version tenant compte des règles de l'assistant IA : une règle nouvelle ou retirée fait tout relire une fois. */
+        static String versionFor(String owner, List<ReglesIa.Regle> regles) {
+            return versionFor(owner) + "|" + ReglesIa.signature(regles);
+        }
     }
 
     public static Result analyse(List<SmsParser.Sms> messages, SmsParser.Config cfg) {
@@ -75,9 +80,10 @@ public final class Analyzer {
         c.auto = cfg.auto;
         c.ownerOm = cfg.ownerOm != null && cfg.ownerOm.matches("6\\d{8}") ? cfg.ownerOm : SmsParser.detectOwner(om);
         out.ownerOm = c.ownerOm;
-        if (cache != null && !cache.version.equals(Cache.versionFor(c.ownerOm))) {
+        c.reglesIa.addAll(cfg.reglesIa);
+        if (cache != null && !cache.version.equals(Cache.versionFor(c.ownerOm, c.reglesIa))) {
             cache.data.clear();
-            cache.version = Cache.versionFor(c.ownerOm);
+            cache.version = Cache.versionFor(c.ownerOm, c.reglesIa);
             cache.reset = true;
         }
 

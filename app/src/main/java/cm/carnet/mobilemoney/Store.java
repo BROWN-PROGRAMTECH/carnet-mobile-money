@@ -712,7 +712,25 @@ public final class Store extends SQLiteOpenHelper {
         String manual = p.getString("ownerOm", "").replaceAll("\\D", "");
         if (manual.length() > 9) manual = manual.substring(manual.length() - 9);
         c.ownerOm = manual.matches("6\\d{8}") ? manual : p.getString("ownerOmAuto", "");
+        c.reglesIa.addAll(reglesIa(ctx));
         return c;
+    }
+
+    /** Règles de lecture de l'assistant IA gardées en mémoire (validées pour tous + proposées pour ce compte). */
+    public static List<ReglesIa.Regle> reglesIa(Context ctx) {
+        List<ReglesIa.Regle> out = new ArrayList<>();
+        String raw = ctx.getSharedPreferences("reglages", Context.MODE_PRIVATE).getString("regles_ia", "");
+        if (raw.isEmpty()) return out;
+        try {
+            org.json.JSONArray a = new org.json.JSONArray(raw);
+            for (int i = 0; i < a.length(); i++) {
+                org.json.JSONObject o = a.getJSONObject(i);
+                out.add(ReglesIa.regle(o.optString("id", ""), o.isNull("operateur") ? null : o.optString("operateur", ""), o.optString("signature", ""),
+                        o.optString("montant", ""), o.optString("solde", ""), o.optString("frais", ""), o.optInt("sens", 0),
+                        o.optString("libelle", ""), o.optBoolean("validee", false)));
+            }
+        } catch (Exception ignored) {}
+        return out;
     }
 
     public static void savePref(Context ctx, String key, String value) {

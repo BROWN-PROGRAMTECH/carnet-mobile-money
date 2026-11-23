@@ -57,6 +57,11 @@ label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
 .msg{padding:10px 12px;border-radius:8px;margin:10px 0;font-size:13px}
 .msg.err{background:var(--bad-bg);color:var(--bad)}.msg.ok{background:var(--accent-bg);color:var(--accent)}.msg.info{background:var(--warn-bg);color:var(--warn)}
 dialog{border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);padding:18px;width:min(440px,calc(100vw - 32px))}
+dialog{max-height:calc(100vh - 32px);overflow:auto}
+.chk{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:2px 10px;max-height:190px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+.chk label{display:flex;gap:6px;align-items:center;margin:2px 0;color:var(--ink)}.chk input{width:auto}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}
+.t-active{background:var(--accent);color:var(--surface)}.t-arretee,.t-terminee{background:var(--line);color:var(--muted)}.t-a_venir{background:var(--warn-bg);color:var(--warn)}
 dialog::backdrop{background:rgba(0,0,0,.35)}
 dialog h3{margin:0 0 6px;font-size:16px}
 dialog .actions{justify-content:flex-end;margin-top:14px}
@@ -122,7 +127,7 @@ const dt = v => { if(v==null||v==="") return "—"; const t = new Date(v); retur
 const ago = ms => { if(!ms) return "jamais"; const h=(Date.now()-ms)/36e5; if(h<1) return "il y a "+Math.max(1,Math.round(h*60))+" min"; if(h<48) return "il y a "+Math.round(h)+" h"; return "il y a "+Math.round(h/24)+" j"; };
 const esc = s => String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const tel = t => t ? esc(t) : '<span class="muted">—</span>';
-const STATUTS = {en_attente:"En attente",valide:"Validée",refuse:"Refusée",suspendu:"Suspendu",actif:"Actif",offert:"Offert",paye:"Payé",hors_ligne:"Hors ligne"};
+const STATUTS = {active:"Active",arretee:"Arrêtée",terminee:"Terminée",a_venir:"À venir",en_attente:"En attente",valide:"Validée",refuse:"Refusée",suspendu:"Suspendu",actif:"Actif",offert:"Offert",paye:"Payé",hors_ligne:"Hors ligne"};
 const tag = s => `<span class="tag t-${esc(s)}">${esc(STATUTS[s]||s)}</span>`;
 const OPS = {OM:"Orange Money", MOMO:"MTN MoMo", ADMIN:"Crédit admin"};
 
@@ -187,8 +192,11 @@ async function load(all){
     if (all || tab==="recharges") t.recus = rpc("admin_recus", { p_jours: 30 }).catch(()=>[]);
     if (all || ["apercu","comptes"].includes(tab)) t.comptes = rpc("admin_comptes");
     if (all || tab==="comptes") t.caisses = rpc("admin_caisses").catch(()=>[]);
-    if (all || ["comptes","applications"].includes(tab)) t.modules = rpc("admin_modules").catch(()=>null);
+    if (all || ["comptes","promotions"].includes(tab)) t.comptes = t.comptes || rpc("admin_comptes");
+    if (all || tab==="promotions") t.promotions = rpc("admin_promotions").catch(()=>null);
+    if (all || ["comptes","applications","promotions"].includes(tab)) t.modules = rpc("admin_modules").catch(()=>null);
     if (all || tab==="applications") t.alertes = rpc("admin_alertes").catch(()=>null);
+    if (all || tab==="ia") t.ia = rpc("admin_ia").catch(()=>null);
     if (all || tab==="exports") t.exports = rpc("admin_exports", { p_jours: 30 });
     if (all || tab==="appareils") t.appareils = rpc("admin_appareils");
     if (all || tab==="incidents") t.incidents = rpc("admin_incidents", { p_jours: 30 });
@@ -203,7 +211,7 @@ async function load(all){
 }
 
 // ---------- Affichage ----------
-const TABS = [["apercu","Vue d'ensemble"],["recharges","Recharges"],["comptes","Comptes"],["applications","Applications"],["exports","Exports"],["appareils","Téléphones"],["incidents","Incidents"],["parametres","Paramètres"]];
+const TABS = [["apercu","Vue d'ensemble"],["recharges","Recharges"],["comptes","Comptes"],["applications","Applications"],["promotions","Promotions"],["ia","IA"],["exports","Exports"],["appareils","Téléphones"],["incidents","Incidents"],["parametres","Paramètres"]];
 function render(){
   const s = cache.stats || {};
   $("tabs").innerHTML = TABS.map(([k,l])=>{
@@ -211,7 +219,7 @@ function render(){
     return `<button class="${k===tab?"on":""}" data-tab="${k}">${l}${n?`<span class="n">${n}</span>`:""}</button>`;
   }).join("");
   $("tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{ tab=b.dataset.tab; render(); load(false); });
-  $("view").innerHTML = ({apercu,recharges,comptes,applications,exports,appareils,incidents,parametres})[tab]();
+  $("view").innerHTML = ({apercu,recharges,comptes,applications,promotions,ia,exports,appareils,incidents,parametres})[tab]();
   bind();
 }
 
@@ -281,16 +289,84 @@ function modulesCompte(uid){ const r=((cache.modules||{}).comptes||[]).find(x=>x
 function nomModule(code){ const m=((cache.modules||{}).catalogue||[]).find(x=>x.code===code); return m ? m.nom : code; }
 function applications(){
   const m = cache.modules;
-  if (!m) return `<p class="muted">Chargement… (le serveur doit avoir supabase/modules.sql appliqué)</p>`;
-  const row = x => `<tr><td><b>${esc(x.nom)}</b>${x.est_pack?` <span class="tag">pack</span>`:""}<div class="muted" style="font-size:12px;max-width:420px">${esc(x.description)}${x.est_pack?` · contient ${x.contenu.map(nomModule).map(esc).join(", ")}${x.telephones>1?` · ${x.telephones} téléphones`:""}`:""}</div></td>
-      <td class="num"><input data-prix="${esc(x.code)}" type="number" step="100" min="0" value="${x.prix}" style="width:100px">${x.par_telephone?`<div class="muted" style="font-size:12px">par téléphone en plus</div>`:""}</td>
-      <td><label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" data-actif="${esc(x.code)}" ${x.actif?"checked":""} style="width:auto"> proposée</label></td>
-      <td class="num">${x.abonnes}${x.essais?`<div class="muted" style="font-size:12px">dont ${x.essais} en essai</div>`:""}</td><td class="num">${fcfa(x.revenu_mois)}</td>
-      <td><button class="b" data-savemod="${esc(x.code)}">Enregistrer</button></td></tr>`;
+  if (!m) return `<p class="muted">Chargement… (le serveur doit avoir supabase/promotions.sql appliqué)</p>`;
+  const lim = m.limites || {};
+  const row = x => `<tr><td><b>${esc(x.nom)}</b>${x.est_pack?` <span class="tag">pack</span>`:""}${x.actif?"":` ${tag("arretee")}`}<div class="muted" style="font-size:12px;max-width:420px">${esc(x.description)}${x.est_pack?` · contient ${(x.contenu||[]).map(nomModule).map(esc).join(", ")}${x.telephones>1?` · ${x.telephones} téléphones`:""}`:""}</div></td>
+      <td class="num">${fcfa(x.prix)}${x.par_telephone?`<div class="muted" style="font-size:12px">par téléphone en plus</div>`:""}</td>
+      <td class="num">${x.prix_annuel?fcfa(x.prix_annuel):'<span class="muted">—</span>'}</td>
+      <td class="num">${x.abonnes}${x.essais?`<div class="muted" style="font-size:12px">dont ${x.essais} en essai</div>`:""}${x.annuels?`<div class="muted" style="font-size:12px">dont ${x.annuels} à l'année</div>`:""}</td><td class="num">${fcfa(x.revenu_mois)}</td>
+      <td><div class="actions"><button class="b" data-editmod="${esc(x.code)}">Modifier</button>${x.est_pack?`<button class="b x" data-delmod="${esc(x.code)}">Supprimer</button>`:""}</div></td></tr>`;
   return `<div class="kpis"><div class="card kpi good"><div class="l">Applications · ce mois</div><div class="v">${fcfa(m.revenu_mois)}</div><div class="muted" style="font-size:12px;margin-top:2px">achats et renouvellements</div></div></div>
-    <p class="muted">Base gratuite pour tous (lecture des SMS, journal, entrées et dépenses). Chaque application : essai gratuit à la première activation, puis abonnement mensuel prélevé sur le porte-monnaie. Un nouveau prix s'applique aux activations et renouvellements suivants.</p>
-    <div class="tablewrap"><table><thead><tr><th>Application</th><th class="num">Prix / mois (FCFA)</th><th>Catalogue</th><th class="num">Actifs</th><th class="num">Revenu du mois</th><th></th></tr></thead><tbody>
-    ${(m.catalogue||[]).map(row).join("")}</tbody></table></div>${alertesBloc()}`;
+    <div class="bar"><button class="b p" id="newPack">Nouveau pack</button><span class="muted">Base gratuite pour tous. Essai gratuit à la première activation, puis abonnement au mois (ou à l'année si un prix annuel est fixé). Un nouveau prix s'applique aux activations et renouvellements suivants.</span></div>
+    <div class="tablewrap"><table><thead><tr><th>Application ou pack</th><th class="num">Prix / mois</th><th class="num">Prix / an</th><th class="num">Actifs</th><th class="num">Revenu du mois</th><th></th></tr></thead><tbody>
+    ${(m.catalogue||[]).map(row).join("")}</tbody></table></div>
+    <h3 style="margin:18px 0 8px;font-size:15px">Quotas et limites</h3>
+    <div class="card" style="max-width:560px"><div class="row2">
+      ${LIMITES.map(([k,l,def])=>`<div><label for="l_${k}">${l}</label><input id="l_${k}" type="number" min="0" value="${esc(lim[k]??def)}"></div>`).join("")}</div>
+      <p class="muted" style="font-size:12px">Essai : pour les prochaines activations. Quotas IA : par compte et par mois. WhatsApp : messages par compte sur 24 h.</p>
+      <div class="actions"><button class="b p" id="saveLimites">Enregistrer les limites</button></div></div>
+    ${alertesBloc()}`;
+}
+const LIMITES = [["essai_jours","Jours d'essai gratuit","14"],["ia_quota","Questions à l'assistant IA / mois","300"],["ia_sms_mois","SMS lus par l'IA / mois","100"],["whatsapp_jour","Messages WhatsApp / 24 h","30"]];
+
+const TYPES_PROMO = {pourcent:"Pourcentage", montant:"Montant fixe en moins", prix:"Prix spécial", jours:"Jours offerts", bonus_recharge:"Bonus de recharge"};
+const CIBLES = {code:"Code promo", comptes:"Comptes choisis", groupe:"Groupe de clients", tous:"Tous les clients"};
+const GROUPES = {nouveaux:"Nouveaux comptes (moins de 30 jours)", sans_abonnement:"Sans aucune application active", anciens_abonnes:"Anciens abonnés (plus rien d'actif)", inactifs:"Inactifs depuis 30 jours"};
+function promoEtat(p){
+  if (!p.actif) return "arretee";
+  if (p.fin && new Date(p.fin) < new Date()) return "terminee";
+  if (p.max_utilisations != null && p.utilisations >= p.max_utilisations) return "terminee";
+  if (p.debut && new Date(p.debut) > new Date()) return "a_venir";
+  return "active";
+}
+function promoResume(p){
+  const apps = (p.modules||[]).length ? " sur " + p.modules.map(nomModule).join(", ") : (p.type==="bonus_recharge" ? "" : " sur toutes les applications");
+  const duree = p.duree_mois > 1 ? ` pendant ${p.duree_mois} mois` : " (1 mois)";
+  return ({pourcent:`-${p.valeur} %${apps}${duree}`, montant:`-${fcfa(p.valeur)} par mois${apps}${duree}`, prix:`${fcfa(p.valeur)} par mois${apps}${duree}`,
+    jours:`${p.valeur} jours offerts${apps}`, bonus_recharge:`+${p.valeur} % sur chaque recharge${p.seuil?` dès ${fcfa(p.seuil)}`:""}${p.duree_mois>1?` (${p.duree_mois} recharges)`:" (1 recharge)"}`})[p.type] || p.type;
+}
+function promoCible(p){
+  if (p.cible==="code") return `code <span class="mono"><b>${esc(p.code)}</b></span>`;
+  if (p.cible==="groupe") return esc(GROUPES[p.groupe]||p.groupe);
+  if (p.cible==="comptes") { const tels=(p.comptes||[]).map(id=>((cache.comptes||[]).find(c=>c.user_id===id)||{}).telephone||"?"); return esc(tels.slice(0,4).join(", ")) + (tels.length>4?` +${tels.length-4}`:""); }
+  return "tous les clients";
+}
+function promotions(){
+  const ps = cache.promotions;
+  if (!ps) return `<p class="muted">Chargement… (le serveur doit avoir supabase/promotions.sql appliqué)</p>`;
+  const actives = ps.filter(p=>promoEtat(p)==="active");
+  const eco = ps.reduce((t,p)=>t+(p.economie||0),0), clients = ps.reduce((t,p)=>t+(p.clients||0),0);
+  const row = p => `<tr><td>${tag(promoEtat(p))}<div class="muted" style="font-size:12px">créée le ${d(p.cree)}</div></td>
+    <td><b>${esc(p.nom)}</b><div style="font-size:13px">${esc(promoResume(p))}</div><div class="muted" style="font-size:12px">${esc(p.description||"")}</div></td>
+    <td>${promoCible(p)}</td>
+    <td>${p.debut||p.fin?`${p.debut?"du "+d(p.debut):""} ${p.fin?"au "+d(p.fin):""}`:'<span class="muted">sans date</span>'}</td>
+    <td class="num">${p.utilisations}${p.max_utilisations!=null?` / ${p.max_utilisations}`:""}<div class="muted" style="font-size:12px">${p.clients} client(s)</div></td>
+    <td class="num">${fcfa(p.economie)}</td>
+    <td><div class="actions"><button class="b" data-editpromo="${p.id}">Modifier</button>${p.actif?`<button class="b x" data-stoppromo="${p.id}">Arrêter</button>`:""}</div></td></tr>`;
+  return `<div class="kpis"><div class="card kpi good"><div class="l">Promotions actives</div><div class="v">${actives.length}</div></div>
+    <div class="card kpi"><div class="l">Clients concernés</div><div class="v">${clients}</div></div>
+    <div class="card kpi"><div class="l">Réductions et bonus accordés</div><div class="v">${fcfa(eco)}</div></div></div>
+    <div class="bar"><button class="b p" id="newPromo">Nouvelle promotion</button><span class="muted">Le client voit ses promotions dans Compte → Applications ; la meilleure réduction s'applique toute seule au paiement, les bonus à la validation de la recharge.</span></div>
+    <div class="tablewrap"><table><thead><tr><th>État</th><th>Promotion</th><th>Pour</th><th>Dates</th><th class="num">Utilisations</th><th class="num">Accordé</th><th></th></tr></thead><tbody>
+    ${ps.map(row).join("") || `<tr><td colspan="7" class="empty">Aucune promotion. Créez un code promo, une offre pour un groupe ou un bonus de recharge.</td></tr>`}</tbody></table></div>`;
+}
+function ia(){
+  const a = cache.ia;
+  if (!a) return `<p class="muted">Chargement… (le serveur doit avoir supabase/ia.sql appliqué)</p>`;
+  const m = a.mois || {};
+  const sens = x => x > 0 ? "entrée" : x < 0 ? "sortie" : "information";
+  const row = x => `<tr><td>${tag(x.statut==="validee"?"valide":x.statut==="refusee"?"refuse":"en_attente")}<div class="muted" style="font-size:12px">${d(x.cree)}</div></td>
+    <td><b>${esc(x.libelle)}</b> · ${esc(x.operateur||"tous")} · ${sens(x.sens)}<div class="muted" style="font-size:12px">${esc(x.explication)}</div>
+      <div class="mono" style="font-size:12px;margin-top:4px">signature : ${esc(x.signature)}<br>montant : ${esc(x.montant||"—")} · solde : ${esc(x.solde||"—")}${x.frais?` · frais : ${esc(x.frais)}`:""}</div>
+      <div style="font-size:12px;margin-top:4px;background:#f5f5f5;padding:6px;border-radius:6px">${esc(x.exemple)}</div></td>
+    <td>${x.statut!=="validee"?`<button class="b ok" data-regle="${x.id}" data-statut="validee">Valider pour tous</button>`:""}
+        ${x.statut!=="refusee"?`<button class="b" data-regle="${x.id}" data-statut="refusee">Refuser</button>`:""}</td></tr>`;
+  return `<div class="kpis"><div class="card kpi"><div class="l">Questions ce mois</div><div class="v">${m.questions||0}</div></div>
+    <div class="card kpi"><div class="l">SMS lus par l'IA</div><div class="v">${m.sms||0}</div></div><div class="card kpi"><div class="l">Comptes</div><div class="v">${m.comptes||0}</div></div></div>
+    <p class="muted">Règles de lecture proposées par l'IA pour des SMS inconnus (données personnelles masquées). Une règle proposée sert déjà au compte qui l'a demandée ; validée, elle sert à tous les téléphones à leur prochaine synchronisation. Vérifiez l'exemple, le sens et le montant avant de valider.
+    Si rien n'arrive : secret ANTHROPIC_API_KEY absent dans Supabase → Edge Functions → Secrets.</p>
+    <div class="tablewrap"><table><thead><tr><th>Statut</th><th>Règle</th><th></th></tr></thead><tbody>
+    ${(a.regles||[]).map(row).join("") || `<tr><td colspan="3" class="empty">Aucune règle proposée pour l'instant.</td></tr>`}</tbody></table></div>`;
 }
 function alertesBloc(){
   const a = cache.alertes; if (!a) return "";
@@ -359,10 +435,17 @@ function bind(){
   document.querySelectorAll("[data-modifier]").forEach(b=>b.onclick=()=>modifier(b.dataset.modifier));
   const sp=$("saveParams"); if(sp) sp.onclick=saveParams;
   document.querySelectorAll("[data-offrir]").forEach(b=>b.onclick=()=>offrir(b.dataset.offrir));
-  document.querySelectorAll("[data-savemod]").forEach(b=>b.onclick=()=>{
-    const code=b.dataset.savemod, prix=+document.querySelector(`[data-prix="${code}"]`).value, actif=document.querySelector(`[data-actif="${code}"]`).checked;
-    act("admin_module", { p_code: code, p_prix: prix, p_actif: actif }, nomModule(code) + " : " + fcfa(prix) + " par mois" + (actif ? "" : ", retirée du catalogue") + ".");
-  });
+  document.querySelectorAll("[data-regle]").forEach(b=>b.onclick=()=>act("admin_regle_ia", { p_id: b.dataset.regle, p_statut: b.dataset.statut },
+    b.dataset.statut==="validee" ? "Règle validée : elle sert maintenant à tous les téléphones." : "Règle refusée."));
+  document.querySelectorAll("[data-editmod]").forEach(b=>b.onclick=()=>editerModule(b.dataset.editmod));
+  document.querySelectorAll("[data-delmod]").forEach(b=>b.onclick=()=>supprimerModule(b.dataset.delmod));
+  const np=$("newPack"); if(np) np.onclick=()=>editerModule(null);
+  const sl=$("saveLimites"); if(sl) sl.onclick=saveLimites;
+  const npr=$("newPromo"); if(npr) npr.onclick=()=>editerPromo(null);
+  document.querySelectorAll("[data-editpromo]").forEach(b=>b.onclick=()=>editerPromo(b.dataset.editpromo));
+  document.querySelectorAll("[data-stoppromo]").forEach(b=>b.onclick=()=>{ const p=cache.promotions.find(x=>x.id===b.dataset.stoppromo);
+    dialog(`<h3>Arrêter « ${esc(p.nom)} » ?</h3><p class="muted">Plus personne ne pourra en profiter. Les paiements déjà faits ne changent pas.</p>`,
+      () => act("admin_arreter_promotion", { p_id: p.id }, "Promotion arrêtée."), "Arrêter", true); });
 }
 
 function dialog(html, onOk, okLabel="Confirmer", danger=false){
@@ -378,6 +461,99 @@ function dialog(html, onOk, okLabel="Confirmer", danger=false){
 }
 async function act(name, args, ok){ await rpc(name, args); flash(demo ? "Démonstration : « " + ok + " » (rien n'a été envoyé)." : ok); await load(true); }
 
+function editerModule(code){
+  const cat = ((cache.modules||{}).catalogue||[]);
+  const x = code ? cat.find(m=>m.code===code) : {code:"",nom:"",description:"",prix:1500,prix_annuel:null,est_pack:true,contenu:[],telephones:1,ordre:9,actif:true};
+  const apps = cat.filter(m=>!m.est_pack);
+  dialog(`<h3>${code?"Modifier « "+esc(x.nom)+" »":"Nouveau pack"}</h3>
+    ${code?"":`<label for="mc">Code (PACK_ suivi de lettres)</label><input id="mc" value="PACK_" style="text-transform:uppercase">`}
+    <label for="mn">Nom</label><input id="mn" value="${esc(x.nom)}">
+    <label for="md">Description (vue par les clients)</label><textarea id="md" rows="3">${esc(x.description)}</textarea>
+    <div class="row2"><div><label for="mp">Prix par mois (FCFA)</label><input id="mp" type="number" min="0" step="100" value="${x.prix}"></div>
+      <div><label for="ma">Prix par an (vide = pas de formule annuelle)</label><input id="ma" type="number" min="0" step="100" value="${x.prix_annuel??""}" placeholder="ex. ${x.prix*10}"></div></div>
+    ${x.est_pack?`<label>Applications du pack (au moins deux)</label><div class="chk">${apps.map(a=>`<label><input type="checkbox" data-c="${esc(a.code)}" ${(x.contenu||[]).includes(a.code)?"checked":""}> ${esc(a.nom)}</label>`).join("")}</div>
+      <div class="row2"><div><label for="mt">Téléphones inclus</label><input id="mt" type="number" min="1" max="50" value="${x.telephones||1}"></div><div><label for="mo">Ordre d'affichage</label><input id="mo" type="number" value="${x.ordre??9}"></div></div>`
+      :`<label for="mo">Ordre d'affichage</label><input id="mo" type="number" value="${x.ordre??0}">`}
+    <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input id="mac" type="checkbox" style="width:auto" ${x.actif?"checked":""}> Proposé dans le catalogue</label>
+    <p class="muted" style="font-size:12px">Retiré du catalogue : plus d'activation ni de renouvellement ; les clients gardent leur période en cours.</p>`,
+    async f => {
+      const q = s => f.querySelector(s);
+      const p = { code: code || q("#mc").value.trim().toUpperCase(), nom: q("#mn").value.trim(), description: q("#md").value.trim(),
+        prix: parseInt(q("#mp").value,10), prix_annuel: q("#ma").value.trim(), ordre: parseInt(q("#mo").value,10)||0, actif: q("#mac").checked };
+      if (!(p.prix >= 0)) throw new Error("Prix par mois invalide.");
+      if (p.prix_annuel && !/^\d+$/.test(p.prix_annuel)) throw new Error("Prix par an invalide.");
+      if (x.est_pack) { p.contenu = [...f.querySelectorAll("[data-c]:checked")].map(i=>i.dataset.c); p.telephones = parseInt(q("#mt").value,10)||1;
+        if (p.contenu.length < 2) throw new Error("Cochez au moins deux applications."); }
+      await act("admin_enregistrer_module", { p }, (p.nom||p.code) + " enregistré" + (p.prix_annuel ? ` : ${fcfa(p.prix)} par mois ou ${fcfa(p.prix_annuel)} par an.` : ` : ${fcfa(p.prix)} par mois.`));
+    }, "Enregistrer");
+}
+function supprimerModule(code){
+  const x = cache.modules.catalogue.find(m=>m.code===code);
+  dialog(`<h3>Supprimer « ${esc(x.nom)} » ?</h3><p class="muted">${x.abonnes?`${x.abonnes} client(s) l'ont : le pack est retiré du catalogue, ils le gardent jusqu'à la fin de leur période, sans renouvellement.`:"Personne ne l'a : il est supprimé."}</p>`,
+    async () => { const r = await rpc("admin_supprimer_module", { p_code: code }); flash(demo ? "Démonstration : rien n'a été envoyé." : (r || "Pack supprimé.")); await load(true); }, "Supprimer", true);
+}
+async function saveLimites(){
+  const b=$("saveLimites"); b.disabled=true;
+  try {
+    for (const [k] of LIMITES) { const v=$("l_"+k).value.trim(); if(!/^\d{1,5}$/.test(v)) throw new Error("Nombre entier attendu."); await rpc("admin_parametre", { p_cle: k, p_valeur: v }); }
+    flash(demo ? "Démonstration : rien n'a été envoyé." : "Limites enregistrées."); await load(true);
+  } catch(e){ flash(e.message, "err"); b.disabled=false; }
+}
+const jourIso = v => v ? String(v).slice(0,10) : "";
+function editerPromo(id){
+  const cat = ((cache.modules||{}).catalogue||[]), cps = cache.comptes||[];
+  const p = id ? cache.promotions.find(x=>x.id===id) : {nom:"",description:"",cible:"code",code:"",groupe:"nouveaux",comptes:[],modules:[],type:"pourcent",valeur:20,seuil:0,duree_mois:1,debut:null,fin:null,max_utilisations:null,actif:true};
+  const opt = (o,v) => Object.entries(o).map(([k,l])=>`<option value="${k}" ${k===v?"selected":""}>${esc(l)}</option>`).join("");
+  dialog(`<h3>${id?"Modifier la promotion":"Nouvelle promotion"}</h3>
+    <label for="pn">Nom (vu par le client)</label><input id="pn" value="${esc(p.nom)}" placeholder="ex. Rentrée -30 %">
+    <label for="pd">Message (facultatif)</label><input id="pd" value="${esc(p.description||"")}" placeholder="ex. Offre réservée à nos commerçants d'Akwa">
+    <div class="row2"><div><label for="pc">Pour qui</label><select id="pc">${opt(CIBLES,p.cible)}</select></div>
+      <div><label for="pt">Réduction</label><select id="pt">${opt(TYPES_PROMO,p.type)}</select></div></div>
+    <div id="zCode"><label for="pk">Code à saisir par le client</label><input id="pk" value="${esc(p.code||"")}" placeholder="RENTREE30" style="text-transform:uppercase"></div>
+    <div id="zGroupe"><label for="pg">Groupe</label><select id="pg">${opt(GROUPES,p.groupe||"nouveaux")}</select></div>
+    <div id="zComptes"><label>Comptes <input id="pq" placeholder="filtrer par numéro" style="width:auto;padding:3px 8px;margin-left:6px" inputmode="tel"></label>
+      <div class="chk" id="pcl">${cps.map(c=>`<label data-tel="${esc(c.telephone||"")}"><input type="checkbox" data-u="${c.user_id}" ${(p.comptes||[]).includes(c.user_id)?"checked":""}> ${esc(c.telephone||"?")}${c.note?` <span class="muted">${esc(c.note)}</span>`:""}</label>`).join("")}</div></div>
+    <div class="row2"><div><label for="pv" id="pvl">Valeur</label><input id="pv" type="number" min="0" value="${p.valeur}"></div>
+      <div id="zDuree"><label for="pm" id="pml">Pendant (mois)</label><input id="pm" type="number" min="1" max="120" value="${p.duree_mois||1}"></div></div>
+    <div id="zSeuil"><label for="ps">Recharge minimum pour le bonus (FCFA)</label><input id="ps" type="number" min="0" step="500" value="${p.seuil||0}"></div>
+    <div id="zApps"><label id="pal">Applications concernées (rien coché = toutes)</label><div class="chk">${cat.map(a=>`<label><input type="checkbox" data-m="${esc(a.code)}" ${(p.modules||[]).includes(a.code)?"checked":""}> ${esc(a.nom)}</label>`).join("")}</div></div>
+    <div class="row2"><div><label for="p1">Début (facultatif)</label><input id="p1" type="date" value="${jourIso(p.debut)}"></div><div><label for="p2">Fin (facultatif)</label><input id="p2" type="date" value="${jourIso(p.fin)}"></div></div>
+    <label for="px">Nombre maximum de clients (vide = sans limite)</label><input id="px" type="number" min="1" value="${p.max_utilisations??""}">
+    <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input id="pa" type="checkbox" style="width:auto" ${p.actif?"checked":""}> Active</label>
+    <p class="muted" style="font-size:12px" id="paide"></p>`,
+    async f => {
+      const q = s => f.querySelector(s);
+      const fin = q("#p2").value, debut = q("#p1").value;
+      const o = { id: id || "", nom: q("#pn").value.trim(), description: q("#pd").value.trim(), cible: q("#pc").value, type: q("#pt").value,
+        code: q("#pk").value.trim().toUpperCase(), groupe: q("#pg").value, valeur: parseInt(q("#pv").value,10), seuil: parseInt(q("#ps").value,10)||0,
+        duree_mois: parseInt(q("#pm").value,10)||1, modules: [...f.querySelectorAll("[data-m]:checked")].map(i=>i.dataset.m),
+        comptes: [...f.querySelectorAll("[data-u]:checked")].map(i=>i.dataset.u),
+        debut: debut ? new Date(debut+"T00:00:00").toISOString() : "", fin: fin ? new Date(fin+"T23:59:59").toISOString() : "",
+        max_utilisations: q("#px").value.trim(), actif: q("#pa").checked };
+      if (!o.nom) throw new Error("Donnez un nom à la promotion.");
+      if (!(o.valeur > 0)) throw new Error("Valeur de la réduction invalide.");
+      if (debut && fin && fin < debut) throw new Error("La fin est avant le début.");
+      if (o.cible==="comptes" && !o.comptes.length) throw new Error("Cochez au moins un compte.");
+      if (o.cible==="code" && !/^[A-Z0-9_-]{3,20}$/.test(o.code)) throw new Error("Code promo : 3 à 20 lettres ou chiffres (ex. RENTREE30).");
+      if (o.type==="jours" && (o.cible!=="code" || o.modules.length!==1)) throw new Error("Jours offerts : par code promo, pour une seule application.");
+      if (o.type==="pourcent" && o.valeur > 100) throw new Error("Pourcentage entre 1 et 100.");
+      await act("admin_enregistrer_promotion", { p: o }, "Promotion « " + o.nom + " » enregistrée : " + promoResume(o) + ".");
+    }, "Enregistrer");
+  const f = $("dlgForm"), q = s => f.querySelector(s);
+  const maj = () => {
+    const c = q("#pc").value, t = q("#pt").value;
+    q("#zCode").hidden = c!=="code"; q("#zGroupe").hidden = c!=="groupe"; q("#zComptes").hidden = c!=="comptes";
+    q("#zSeuil").hidden = t!=="bonus_recharge"; q("#zApps").hidden = t==="bonus_recharge"; q("#zDuree").hidden = t==="jours";
+    q("#pvl").textContent = ({pourcent:"Réduction (%)", montant:"FCFA en moins par mois", prix:"Prix spécial (FCFA par mois)", jours:"Nombre de jours offerts", bonus_recharge:"Bonus (% du montant rechargé)"})[t];
+    q("#pml").textContent = t==="bonus_recharge" ? "Nombre de recharges bonifiées" : "Pendant (mois)";
+    q("#pal").textContent = t==="jours" ? "Application offerte (une seule)" : "Applications concernées (rien coché = toutes)";
+    q("#paide").textContent = t==="jours" && c!=="code" ? "Les jours offerts passent par un code promo ; pour des comptes précis, utilisez « Offrir » dans l'onglet Comptes."
+      : t==="prix" ? "Prix spécial : le client paie ce prix chaque mois de la promotion (×12 pour la formule annuelle)."
+      : c==="code" ? "Le client saisit le code dans Compte → Applications → « J'ai un code promo »." : "La promotion s'applique toute seule aux clients concernés.";
+  };
+  q("#pc").onchange = maj; q("#pt").onchange = maj; maj();
+  q("#pq").oninput = () => { const v=q("#pq").value.replace(/\D/g,""); f.querySelectorAll("#pcl label").forEach(l=>l.hidden = !!v && !l.dataset.tel.includes(v)); };
+}
 function valider(id){
   const p = cache.recharges.find(x=>x.id===id);
   dialog(`<h3>Valider cette recharge ?</h3><p>${esc(OPS[p.operateur])} · <span class="mono">${esc(p.reference)}</span><br><b>${fcfa(p.montant)}</b> · client ${tel(p.telephone)}</p>
@@ -456,9 +632,9 @@ const Demo = (() => {
     {telephone:"655778899",type:"SAUVEGARDE_ECHEC",message:"Pas de connexion internet ou serveur injoignable.",version_app:"0.6",cree:iso(now-30*36e5)},
     {telephone:"677445566",type:"SMS_NON_RECONNUS",message:"3 SMS mobile money non reconnus sur ce téléphone (contenu non transmis).",version_app:"0.6",cree:iso(now-2*J)}];
   const parametres = [{cle:"nom_marchand",valeur:"Carnet Mobile Money"},{cle:"numero_om",valeur:"690000000"},{cle:"numero_momo",valeur:"670000000"},{cle:"prix_export_petit",valeur:"500"},{cle:"seuil_export",valeur:"200"},{cle:"prix_export_grand",valeur:"1000"},{cle:"exports_offerts",valeur:"1"},{cle:"recharge_min",valeur:"500"},{cle:"ussd_om",valeur:"#150#"},{cle:"ussd_momo",valeur:"*126#"}];
-  const modules = {revenu_mois: 6800, catalogue: [
+  const modules = {revenu_mois: 6800, limites:{essai_jours:"14",ia_quota:"300",ia_sms_mois:"100",whatsapp_jour:"30"}, catalogue: [
       {code:"PACK_PARTICULIER",nom:"Pack Particulier",description:"Suivi de l'argent + Dettes & créances.",prix:800,est_pack:true,contenu:["SUIVI","DETTES"],telephones:1,actif:true,abonnes:4,essais:2,revenu_mois:1600},
-      {code:"PACK_COMMERCANT",nom:"Pack Commerçant",description:"Caisse commerçant + Finances & budgets + Dettes & créances.",prix:2000,est_pack:true,contenu:["CAISSE","FINANCES","DETTES"],telephones:1,actif:true,abonnes:3,essais:1,revenu_mois:4000},
+      {code:"PACK_COMMERCANT",nom:"Pack Commerçant",description:"Caisse commerçant + Finances & budgets + Dettes & créances.",prix:2000,prix_annuel:20000,est_pack:true,contenu:["CAISSE","FINANCES","DETTES"],telephones:1,actif:true,abonnes:3,essais:1,annuels:1,revenu_mois:4000},
       {code:"PACK_ENTREPRISE",nom:"Pack Entreprise",description:"Toutes les applications, jusqu'à 3 téléphones.",prix:4000,est_pack:true,contenu:["CAISSE","FINANCES","SUIVI","DETTES","MULTI"],telephones:3,actif:true,abonnes:0,essais:0,revenu_mois:0},
       {code:"CAISSE",nom:"Caisse commerçant",description:"Espèces, fond de caisse, écart réel / théorique, journée de caisse, mode agent.",prix:1000,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:2,essais:1,revenu_mois:1000},
       {code:"FINANCES",nom:"Finances & budgets",description:"Trésorerie, résultat, budgets, meilleurs clients. Export Excel inclus.",prix:1000,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:1,essais:1,revenu_mois:0},
@@ -466,10 +642,16 @@ const Demo = (() => {
       {code:"DETTES",nom:"Dettes & créances",description:"Qui me doit, à qui je dois, échéances.",prix:500,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:1,essais:0,revenu_mois:200},
       {code:"MULTI",nom:"Multi-téléphones",description:"Une caisse par téléphone, code patron.",prix:1000,par_telephone:true,est_pack:false,contenu:[],telephones:1,actif:true,abonnes:0,essais:0,revenu_mois:0}],
     comptes: [{user_id:u(1),actifs:["CAISSE","DETTES","FINANCES"]},{user_id:u(2),actifs:["SUIVI","DETTES"]}]};
+  const promotions = [
+    {id:"p1",nom:"Rentrée -30 %",description:"Pour bien démarrer l'année",cible:"code",code:"RENTREE30",groupe:null,comptes:[],modules:["PACK_COMMERCANT"],type:"pourcent",valeur:30,seuil:0,duree_mois:2,debut:iso(now-10*J),fin:iso(now+20*J),max_utilisations:100,utilisations:14,actif:true,cree:iso(now-10*J),clients:14,economie:8400},
+    {id:"p2",nom:"Bonus recharge 10 %",description:"",cible:"tous",code:null,groupe:null,comptes:[],modules:[],type:"bonus_recharge",valeur:10,seuil:5000,duree_mois:3,debut:null,fin:iso(now+5*J),max_utilisations:null,utilisations:22,actif:true,cree:iso(now-15*J),clients:22,economie:13500},
+    {id:"p3",nom:"Bienvenue",description:"Caisse à 500 FCFA le premier mois",cible:"groupe",code:null,groupe:"nouveaux",comptes:[],modules:["CAISSE"],type:"prix",valeur:500,seuil:0,duree_mois:1,debut:null,fin:null,max_utilisations:null,utilisations:3,actif:true,cree:iso(now-40*J),clients:3,economie:1500},
+    {id:"p4",nom:"Fidélité Akwa",description:"",cible:"comptes",code:null,groupe:null,comptes:[u(1),u(4)],modules:[],type:"montant",valeur:300,seuil:0,duree_mois:6,debut:null,fin:null,max_utilisations:null,utilisations:2,actif:false,cree:iso(now-60*J),clients:2,economie:2400}];
   const recus = [{id:3,operateur:"MOMO",reference:"8472619305",montant:5000,numero:"690112233",quand:iso(now-9*J),recharge_id:11,telephone:"690112233"},
     {id:4,operateur:"OM",reference:"PP251121.0915.B77120",montant:2000,numero:"691234567",quand:iso(now-5*36e5),recharge_id:null,telephone:null}];
   const stats = {comptes:5,nouveaux_7_jours:2,clients_payants:3,soldes_total:15500,soldes_negatifs:1,recharges_en_attente:1,montant_en_attente:5000,recharges_mois:5000,exports_mois:4,exports_payants_mois:3,revenu_exports_mois:2500,appareils:3,appareils_silencieux:1,incidents_7_jours:2};
-  return { rpc: async (n) => ({admin_stats:stats,admin_comptes:comptes,admin_recharges:recharges,admin_exports:exports,admin_appareils:appareils,admin_incidents:incidents,admin_recus:recus,admin_modules:modules,admin_alertes:{jour:{envoye:12,en_attente:1},mois:148,destinataires:5,erreurs:[]},parametres})[n] ?? null };
+  return { rpc: async (n) => ({admin_stats:stats,admin_comptes:comptes,admin_recharges:recharges,admin_exports:exports,admin_appareils:appareils,admin_incidents:incidents,admin_recus:recus,admin_modules:modules,admin_promotions:promotions,admin_alertes:{jour:{envoye:12,en_attente:1},mois:148,destinataires:5,erreurs:[]},
+    admin_ia:{mois:{questions:87,sms:9,comptes:4},regles:[{id:"r1",operateur:"OM",signature:"carte prepayee virtuelle.*rechargee",montant:"rechargee de ([\\d .,]+?) XAF",solde:"nouveau solde\\s*:\\s*([\\d .,]+?) XAF",frais:"",sens:-1,libelle:"Recharge carte virtuelle",exemple:"Votre carte prepayee virtuelle a ete rechargee de 1000 XAF. Nouveau solde : 12640.53 XAF. Merci d'utiliser Orange Money.",explication:"Recharge de la carte prépayée depuis le compte Orange Money.",statut:"proposee",cree:iso(now-2*36e5)}]},parametres})[n] ?? null };
 })();
 
 init();

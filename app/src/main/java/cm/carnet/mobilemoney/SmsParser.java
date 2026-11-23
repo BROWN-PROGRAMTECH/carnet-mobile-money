@@ -85,6 +85,8 @@ public final class SmsParser {
         public boolean auto = false;
         /** Numéro Orange Money du titulaire (9 chiffres), saisi ou détecté. Sert au sens des transferts. */
         public String ownerOm = "";
+        /** Règles proposées par l'assistant IA pour les SMS que les règles fournies ne savent pas lire (0.13). */
+        public final List<ReglesIa.Regle> reglesIa = new ArrayList<>();
 
         public static Config of(String om, String momo, boolean auto) {
             return of(om, momo, DEFAULT_BANQUES, auto);
@@ -156,7 +158,7 @@ public final class SmsParser {
     }
 
     /** Version des règles de lecture : à augmenter à chaque changement de règle, pour relire les SMS déjà mémorisés. */
-    public static final int RULES_VERSION = 3;
+    public static final int RULES_VERSION = 4;
 
     /** Empreinte stable d'un SMS (expéditeur + texte), identique à celle de la base locale. */
     public static String hashOf(String address, String body) {
@@ -286,6 +288,8 @@ public final class SmsParser {
         }
         if (estBanque(sms.op)) return parseBanque(text, t);
         boolean ok = "OM".equals(sms.op) ? parseOm(text, t, cfg) : parseMomo(text, t);
+        // Règles de l'assistant IA : seulement pour ce que les règles fournies ne savent pas lire.
+        if (!ok && ReglesIa.appliquer(cfg.reglesIa, sms.op, text, t)) return t;
         if (!ok) {
             Long amt = firstAmount(text);
             if (has(text, NOISE) || amt == null) { t.kind = Txn.NOISE; return t; }
@@ -388,6 +392,20 @@ public final class SmsParser {
     static final Pattern OM_ID = Pattern.compile("\\b([A-Z]{1,3}\\d{6}\\.\\d{4}\\.[A-Z]\\d{5})\\b");
 
     static boolean parseOm(String text, Txn t, Config cfg) {
+        // Recharge de la carte prépayée virtuelle Orange Money (sans ID) : sortie du compte OM vers la carte,
+        // « Nouveau solde » = solde du compte OM.
+        if (has(text, "carte prepayee virtuelle") && has(text, "rechargee de")) {
+            Long m = labeled(text, "rechargee de");
+            if (m != null) {
+                t.kind = Txn.TX;
+                t.type = "CARTE_VIRTUELLE";
+                t.sens = -1;
+                t.montant = m;
+                t.solde = labeled(text, "nouveau solde");
+                t.frais = orZero(labeled(text, "frais"));
+                return true;
+            }
+        }
         // Consultation de solde
         Long solde = labeled(text, "le solde de votre compte est de|votre solde est de|votre solde est");
         if (solde != null && !OM_ID.matcher(text).find()) {

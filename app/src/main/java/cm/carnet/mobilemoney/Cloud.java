@@ -27,7 +27,7 @@ import java.util.UUID;
 public final class Cloud {
     private Cloud() {}
 
-    public static final String VERSION_APP = "0.12";
+    public static final String VERSION_APP = "0.14";
     private static final String DOMAIN = "@carnet-mm.app";
     private static final int PAGE = 1000, BATCH = 500;
 
@@ -265,6 +265,7 @@ public final class Cloud {
             try { envoyerExportsEnAttente(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
             try { rafraichirModules(c, tok); rappelModules(c); } catch (Exception ignored) {}
             try { alertes(c, tok, st, false); } catch (Exception ignored) {}
+            try { rafraichirReglesIa(c, tok); lireInconnusIa(c, tok, st); } catch (Exception ignored) {}
             envoyerIncidents(c, tok, userId);
         } catch (CloudException e) {
             saveError(c, e.getMessage());
@@ -780,6 +781,11 @@ public final class Cloud {
                 x.description = m.optString("description", "");
                 x.prix = m.optLong("prix", 0);
                 x.prixCompte = m.isNull("prix_compte") ? x.prix : m.optLong("prix_compte", x.prix);
+                x.prixNormal = m.isNull("prix_normal") ? x.prixCompte : m.optLong("prix_normal", x.prixCompte);
+                x.promo = m.isNull("promo") ? null : m.optString("promo", "");
+                if (x.promo != null && x.promo.isEmpty()) x.promo = null;
+                x.prixAnnuel = m.isNull("prix_annuel") ? 0 : m.optLong("prix_annuel", 0);
+                x.prixAnnuelCompte = m.isNull("prix_annuel_compte") ? x.prixAnnuel : m.optLong("prix_annuel_compte", x.prixAnnuel);
                 x.parTelephone = m.optBoolean("par_telephone", false);
                 x.estPack = m.optBoolean("est_pack", false);
                 x.telephones = m.optInt("telephones", 1);
@@ -797,7 +803,24 @@ public final class Cloud {
                 x.essai = a.optBoolean("essai", false);
                 x.essaiUtilise = a.optBoolean("essai_utilise", false);
                 x.offert = a.optBoolean("offert", false);
+                x.periode = a.isNull("periode") ? "mois" : a.optString("periode", "mois");
                 e.abonnements.add(x);
+            }
+            JSONArray pr = o.optJSONArray("promos");
+            if (pr != null) for (int i = 0; i < pr.length(); i++) {
+                JSONObject a = pr.getJSONObject(i);
+                Modules.Promo x = new Modules.Promo();
+                x.nom = a.optString("nom", "");
+                x.description = a.isNull("description") ? "" : a.optString("description", "");
+                x.type = a.optString("type", "");
+                x.valeur = a.optLong("valeur", 0);
+                x.seuil = a.optLong("seuil", 0);
+                x.fin = a.isNull("fin") ? 0 : a.optLong("fin", 0);
+                x.duree = a.optInt("duree", 1);
+                x.restants = a.isNull("restants") ? -1 : a.optInt("restants", -1);
+                JSONArray mo = a.optJSONArray("modules");
+                if (mo != null) for (int j = 0; j < mo.length(); j++) x.modules.add(mo.getString(j));
+                e.promos.add(x);
             }
             e.solde = o.optLong("solde", 0);
             e.essaiJours = o.optInt("essai_jours", 14);
@@ -833,11 +856,17 @@ public final class Cloud {
 
     /** Active une application ou un pack (essai la première fois, sinon un mois payé). Renvoie le message à afficher. */
     public static String activerModule(Context ctx, String code) throws CloudException {
+        return activerModule(ctx, code, "mois");
+    }
+
+    /** periode "an" : formule annuelle payée tout de suite (pas d'essai). */
+    public static String activerModule(Context ctx, String code, String periode) throws CloudException {
         Context c = ctx.getApplicationContext();
         try {
             String tok = token(c);
             JSONObject body = new JSONObject();
             body.put("p_code", code);
+            body.put("p_periode", "an".equals(periode) ? "an" : "mois");
             JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/activer_module", body.toString(), tok, null));
             try { rafraichirModules(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
             Modules.Module m = modules(c).module(code);
@@ -845,7 +874,7 @@ public final class Cloud {
             String fin = r.optLong("fin", 0) > 0 ? Modules.date(r.optLong("fin", 0)) : "";
             switch (r.optString("nature", "")) {
                 case "essai": return nom + " installée : essai gratuit jusqu'au " + fin + ".";
-                case "achat": return nom + " activée jusqu'au " + fin + " (" + Tarif.fcfa(r.optLong("prix", 0)) + " débités).";
+                case "achat": return nom + ("an".equals(r.optString("periode", "")) ? " : formule annuelle" : " activée") + " jusqu'au " + fin + " (" + Tarif.fcfa(r.optLong("prix", 0)) + " débités).";
                 default: return nom + " : renouvellement automatique réactivé.";
             }
         } catch (CloudException e) {
@@ -870,6 +899,23 @@ public final class Cloud {
         }
     }
 
+    /** Code promo saisi par l'utilisateur ; renvoie le message du serveur. */
+    public static String utiliserCode(Context ctx, String code) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            String tok = token(c);
+            JSONObject body = new JSONObject();
+            body.put("p_code", code.trim().toUpperCase(java.util.Locale.ROOT));
+            JSONObject r = new JSONObject(http("POST", "/rest/v1/rpc/utiliser_code", body.toString(), tok, null));
+            try { rafraichirModules(c, tok); } catch (Exception ignored) {}
+            return r.optString("message", "Code enregistré.");
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Réponse inattendue du serveur : " + e.getMessage());
+        }
+    }
+
     /** Notification (une fois par jour au plus) quand le solde ne couvre pas les renouvellements des 3 prochains jours. */
     private static void rappelModules(Context c) {
         long now = System.currentTimeMillis();
@@ -879,6 +925,161 @@ public final class Cloud {
         if (jour.equals(prefs(c).getString("rappel_modules", ""))) return;
         prefs(c).edit().putString("rappel_modules", jour).apply();
         SmsReceiver.notify(c, "Applications", msg);
+    }
+
+    // ---------- Agent IA (0.13) ----------
+
+    private static JSONObject appelIa(Context c, String tok, JSONObject body) throws Exception {
+        String r = http("POST", "/functions/v1/ia", body.toString(), tok, null).trim();
+        return r.startsWith("{") ? new JSONObject(r) : new JSONObject();
+    }
+
+    /** Règles de lecture de l'IA (validées pour tous + proposées par ce compte), gardées pour la lecture hors ligne. */
+    private static void rafraichirReglesIa(Context c, String tok) throws Exception {
+        String r = http("POST", "/rest/v1/rpc/regles_ia", "{}", tok, null).trim();
+        if (r.startsWith("[")) Store.savePref(c, "regles_ia", r);
+    }
+
+    /** Ajoute une règle reçue à la liste locale (sans attendre la prochaine synchronisation). */
+    private static void ajouterRegleLocale(Context c, JSONObject regle) throws Exception {
+        JSONArray a = new JSONArray(Store.pref(c, "regles_ia", "[]"));
+        String id = regle.optString("id", "");
+        for (int i = 0; i < a.length(); i++) if (id.equals(a.getJSONObject(i).optString("id", ""))) return;
+        a.put(regle);
+        Store.savePref(c, "regles_ia", a.toString());
+    }
+
+    /**
+     * Fait lire par l'IA un SMS inconnu (texte masqué) ; la règle reçue n'est gardée que si elle lit bien le vrai SMS.
+     * Renvoie le message à afficher.
+     */
+    public static String lireSmsIa(Context ctx, Txn u) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            return lireSmsIa(c, token(c), u);
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Lecture par l'IA impossible : " + e.getMessage());
+        }
+    }
+
+    private static String lireSmsIa(Context c, String tok, Txn u) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("action", "lire_sms");
+        body.put("operateur", u.op == null ? "" : u.op);
+        body.put("texte", ReglesIa.masquer(u.raw));
+        JSONObject r = appelIa(c, tok, body);
+        marquerEssaye(c, u);
+        if (!r.optBoolean("comprend", false)) return "L'IA n'a pas trouvé de mouvement d'argent dans ce SMS : " + r.optString("explication", "");
+        JSONObject regle = r.optJSONObject("regle");
+        if (regle == null) return "Réponse de l'IA incomplète.";
+        ReglesIa.Regle rg = ReglesIa.regle(regle.optString("id", ""), regle.isNull("operateur") ? null : regle.optString("operateur", ""),
+                regle.optString("signature", ""), regle.optString("montant", ""), regle.optString("solde", ""), regle.optString("frais", ""),
+                regle.optInt("sens", 0), regle.optString("libelle", ""), false);
+        Txn essai = new Txn();
+        java.util.List<ReglesIa.Regle> une = new java.util.ArrayList<>();
+        une.add(rg);
+        if (!ReglesIa.appliquer(une, u.op, SmsParser.norm(u.raw), essai)) return "La règle proposée par l'IA ne lit pas ce SMS : il reste à vérifier.";
+        ajouterRegleLocale(c, regle);
+        return "SMS compris par l'IA : « " + essai.typeLabel() + " » " + (essai.sens > 0 ? "+" : essai.sens < 0 ? "−" : "")
+                + SmsParser.fmt(essai.montant > 0 ? essai.montant : essai.solde == null ? 0 : essai.solde) + " FCFA. Les SMS semblables seront lus seuls.";
+    }
+
+    private static void marquerEssaye(Context c, Txn u) {
+        String h = SmsParser.hashOf(u.sender, u.raw);
+        String deja = Store.pref(c, "sms_ia_essayes", "");
+        if (!deja.contains(h)) Store.savePref(c, "sms_ia_essayes", (deja.length() > 4000 ? deja.substring(deja.length() - 3000) : deja) + h + ",");
+    }
+
+    /** À chaque synchronisation : jusqu'à 3 SMS inconnus récents (30 jours) jamais essayés sont lus par l'IA. */
+    private static void lireInconnusIa(Context c, String tok, Store st) throws Exception {
+        Analyzer.Result r = Analyzer.analyse(st.all(), Store.config(c), st.lecture(c));
+        String deja = Store.pref(c, "sms_ia_essayes", "");
+        long depuis = System.currentTimeMillis() - 30L * 24 * 3600 * 1000;
+        int n = 0;
+        for (Txn u : r.unknown) {
+            if (n >= 3) break;
+            if (u.kind != Txn.UNKNOWN || u.smsDate < depuis || u.raw == null) continue;
+            if (deja.contains(SmsParser.hashOf(u.sender, u.raw))) continue;
+            try { lireSmsIa(c, tok, u); } catch (CloudException e) { if (e.reseau) throw e; }
+            n++;
+        }
+    }
+
+    /** Propositions de l'IA pour des opérations sans indice local : cle → [catégorie, confiance]. */
+    public static java.util.Map<String, Classeur.Proposition> classerIa(Context ctx, java.util.List<Txn> ops) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        java.util.Map<String, Classeur.Proposition> out = new java.util.HashMap<>();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("action", "classer");
+            JSONArray a = new JSONArray();
+            java.text.SimpleDateFormat jf = new java.text.SimpleDateFormat("EEEE HH'h'", java.util.Locale.FRANCE);
+            for (int i = 0; i < ops.size(); i++) {
+                Txn t = ops.get(i);
+                JSONObject o = new JSONObject();
+                o.put("i", i);
+                o.put("operateur", Txn.opName(t.op));
+                o.put("type", t.typeLabel());
+                o.put("sens", t.sens);
+                o.put("montant", t.montant / 100);
+                o.put("quand", jf.format(new java.util.Date(t.date)));
+                if (t.motif != null) o.put("motif", ReglesIa.masquer(t.motif));
+                a.put(o);
+            }
+            body.put("operations", a);
+            JSONArray cats = new JSONArray();
+            for (int sens : new int[] {1, -1})
+                for (String code : Caisse.choix(sens)) {
+                    if (Caisse.AGENT.equals(code)) continue;
+                    JSONObject k = new JSONObject();
+                    k.put("code", code);
+                    k.put("nom", Caisse.categorieNom(code));
+                    k.put("sens", sens);
+                    cats.put(k);
+                }
+            body.put("categories", cats);
+            JSONObject r = appelIa(c, token(c), body);
+            JSONArray p = r.optJSONArray("propositions");
+            if (p != null) for (int i = 0; i < p.length(); i++) {
+                JSONObject x = p.getJSONObject(i);
+                int k = x.optInt("i", -1);
+                if (k < 0 || k >= ops.size()) continue;
+                Txn t = ops.get(k);
+                String cat = x.optString("categorie", "");
+                if (!Caisse.compatible(cat, t.sens)) continue;
+                Classeur.Proposition pr = new Classeur.Proposition();
+                pr.cle = Caisse.cle(t);
+                pr.categorie = cat;
+                pr.confiance = Math.max(0, Math.min(100, x.optInt("confiance", 0)));
+                pr.source = "ia";
+                if (pr.confiance >= 40) out.put(pr.cle, pr);
+            }
+            return out;
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("Classement par l'IA impossible : " + e.getMessage());
+        }
+    }
+
+    /** Pose une question à l'assistant ; renvoie [réponse, questions utilisées, quota]. */
+    public static String[] questionIa(Context ctx, String question, String contexte, JSONArray historique) throws CloudException {
+        Context c = ctx.getApplicationContext();
+        try {
+            JSONObject body = new JSONObject();
+            body.put("action", "question");
+            body.put("question", question);
+            body.put("contexte", contexte);
+            body.put("historique", historique);
+            JSONObject r = appelIa(c, token(c), body);
+            return new String[] {r.optString("reponse", ""), String.valueOf(r.optInt("questions", 0)), String.valueOf(r.optInt("quota", 300))};
+        } catch (CloudException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("L'assistant ne répond pas : " + e.getMessage());
+        }
     }
 
     // ---------- Alertes WhatsApp (0.12) ----------

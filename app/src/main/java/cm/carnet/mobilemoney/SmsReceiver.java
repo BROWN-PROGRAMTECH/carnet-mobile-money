@@ -32,7 +32,15 @@ public class SmsReceiver extends BroadcastReceiver {
             SmsParser.Sms sms = new SmsParser.Sms(address, body.toString(), System.currentTimeMillis(), sub >= 0 ? String.valueOf(sub) : "");
             SmsParser.Config cfg = Store.config(ctx);
             String op = SmsParser.detectOp(sms.address, sms.body, cfg);
-            if (op == null) return;
+            if (op == null) {
+                // Faux SMS de paiement (numéro ordinaire qui imite Orange Money ou MoMo) : alerte immédiate.
+                String faux = FauxSms.suspect(sms.address, sms.body, false);
+                if (faux != null) {
+                    notify(ctx, "⚠ Faux SMS de paiement probable", faux);
+                    Store.savePref(ctx, "faux_sms", System.currentTimeMillis() + "|" + faux);
+                }
+                return;
+            }
             boolean isNew = Store.get(ctx).insert(sms);
             ctx.sendBroadcast(new Intent(ACTION_NEW).setPackage(ctx.getPackageName()));
             if (!isNew) return;

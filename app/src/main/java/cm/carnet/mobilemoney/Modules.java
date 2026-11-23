@@ -17,7 +17,7 @@ import java.util.Set;
 public final class Modules {
     private Modules() {}
 
-    public static final String CAISSE = "CAISSE", FINANCES = "FINANCES", SUIVI = "SUIVI", DETTES = "DETTES", MULTI = "MULTI", ALERTES = "ALERTES";
+    public static final String CAISSE = "CAISSE", FINANCES = "FINANCES", SUIVI = "SUIVI", DETTES = "DETTES", MULTI = "MULTI", ALERTES = "ALERTES", ASSISTANT = "ASSISTANT";
     public static final String PACK_PARTICULIER = "PACK_PARTICULIER", PACK_COMMERCANT = "PACK_COMMERCANT", PACK_ENTREPRISE = "PACK_ENTREPRISE";
 
     /** ACTIF : utilisable ; LECTURE : abonnement terminé, données visibles sans ajout ; ABSENT : jamais installée. */
@@ -27,6 +27,22 @@ public final class Modules {
         public String code, nom, description = "";
         /** Prix catalogue et prix pour ce compte (Multi-téléphones : par téléphone en plus), FCFA par mois. */
         public long prix, prixCompte;
+        /** Version 0.14 : prix sans promotion, nom de la promotion appliquée (ou null), formule annuelle (0 = aucune). */
+        public long prixNormal, prixAnnuel, prixAnnuelCompte;
+        public String promo;
+
+        public boolean enPromo() {
+            return promo != null && prixCompte < prixNormal;
+        }
+
+        public boolean annuel() {
+            return prixAnnuel > 0;
+        }
+
+        /** Économie de la formule annuelle par rapport à 12 mois au prix normal (FCFA, 0 si aucune). */
+        public long economieAnnuelle() {
+            return annuel() ? Math.max(0, prixNormal * 12 - prixAnnuelCompte) : 0;
+        }
         public boolean parTelephone, estPack;
         public List<String> contenu = new ArrayList<>();
         public int telephones = 1;
@@ -36,11 +52,28 @@ public final class Modules {
         public String code;
         public long fin;
         public boolean renouveler, essai, essaiUtilise, offert;
+        /** "mois" ou "an" (version 0.14). */
+        public String periode = "mois";
+    }
+
+    /** Promotion ouverte pour ce compte (version 0.14). */
+    public static final class Promo {
+        public String nom, description = "", type;
+        public long valeur, seuil, fin;
+        public int duree;
+        /** Mois de réduction restants, -1 si pas encore utilisée. */
+        public int restants = -1;
+        public final List<String> modules = new ArrayList<>();
+
+        public boolean bonusRecharge() {
+            return "bonus_recharge".equals(type);
+        }
     }
 
     public static final class Etat {
         public final List<Module> catalogue = new ArrayList<>();
         public final List<Abonnement> abonnements = new ArrayList<>();
+        public final List<Promo> promos = new ArrayList<>();
         public long solde;
         public int essaiJours = 14, caisses;
         /** Heure du serveur moins heure du téléphone au moment de la lecture (corrige une horloge fausse). */
@@ -123,12 +156,29 @@ public final class Modules {
                 if (reste <= 0 || reste > 3L * 24 * 3600 * 1000) continue;
                 Module m = module(a.code);
                 if (m == null || (!m.estPack && packActif(a.code, now) != null)) continue;
-                total += m.prixCompte;
+                total += "an".equals(a.periode) && m.annuel() ? m.prixAnnuelCompte : m.prixCompte;
             }
             return total;
         }
 
         /** Rappel à afficher si le solde ne couvre pas les renouvellements proches, sinon null. */
+        /** Meilleur bonus de recharge ouvert pour ce montant (FCFA), 0 si aucun. */
+        public long bonusRecharge(long montant) {
+            long best = 0;
+            for (Promo p : promos) {
+                if (!p.bonusRecharge() || montant < p.seuil) continue;
+                best = Math.max(best, montant * Math.min(100, p.valeur) / 100);
+            }
+            return best;
+        }
+
+        /** Bonus de recharge le plus généreux (pour l'annoncer), ou null. */
+        public Promo meilleurBonus() {
+            Promo best = null;
+            for (Promo p : promos) if (p.bonusRecharge() && (best == null || p.valeur > best.valeur)) best = p;
+            return best;
+        }
+
         public String rappel(long now) {
             long p = aPrevoir(now);
             if (p <= 0 || solde >= p) return null;
@@ -138,7 +188,7 @@ public final class Modules {
     }
 
     /** Applications (hors packs), dans l'ordre d'affichage. */
-    public static final List<String> TOUTES = Arrays.asList(CAISSE, FINANCES, SUIVI, DETTES, MULTI, ALERTES);
+    public static final List<String> TOUTES = Arrays.asList(CAISSE, FINANCES, SUIVI, DETTES, MULTI, ALERTES, ASSISTANT);
 
     /** Profils proposés à l'inscription et ce qu'ils pré-cochent. */
     public static final String[][] PROFILS = {
@@ -199,9 +249,43 @@ public final class Modules {
         long reste = a.fin - (now + e.decalage);
         if (reste <= 0) return "Lecture seule depuis le " + date(a.fin) + (a.essaiUtilise ? "" : " · essai disponible");
         String jusqua = " jusqu'au " + date(a.fin);
+        boolean an = "an".equals(a.periode) && m != null && m.annuel();
         if (a.essai) return "Essai gratuit" + jusqua + (a.renouveler ? ", puis " + Tarif.fcfa(m != null ? m.prixCompte : 0) + "/mois" : "");
+        if (an && !a.offert) return (a.renouveler ? "Formule annuelle · renouvelée le " + date(a.fin) : "Formule annuelle" + jusqua + " · ne sera pas renouvelée");
         if (a.offert) return "Offerte" + jusqua;
         return (a.renouveler ? "Active · renouvelée le " + date(a.fin) : "Active" + jusqua + " · ne sera pas renouvelée");
+    }
+
+    /** Texte court d'une promotion : « -30 % pendant 2 mois », « +10 % sur les recharges dès 5 000 FCFA ». */
+    public static String promoTexte(Etat e, Promo p) {
+        String cible = "";
+        if (!p.modules.isEmpty()) {
+            List<String> noms = new ArrayList<>();
+            for (String c : p.modules) {
+                Module m = e.module(c);
+                noms.add(m != null ? m.nom : c);
+            }
+            cible = " sur " + String.join(", ", noms);
+        }
+        String duree = p.duree > 1 ? " pendant " + p.duree + " mois" : "";
+        if (p.restants > 0) duree = " (encore " + p.restants + " mois)";
+        String t;
+        switch (p.type == null ? "" : p.type) {
+            case "pourcent": t = "-" + p.valeur + " %" + cible + duree; break;
+            case "montant": t = "-" + Tarif.fcfa(p.valeur) + " par mois" + cible + duree; break;
+            case "prix": t = Tarif.fcfa(p.valeur) + " par mois" + cible + duree; break;
+            case "bonus_recharge": t = "+" + p.valeur + " % offerts sur vos recharges" + (p.seuil > 0 ? " dès " + Tarif.fcfa(p.seuil) : ""); break;
+            default: t = p.nom;
+        }
+        if (p.fin > 0) t += " · jusqu'au " + date(p.fin);
+        return t;
+    }
+
+    /** Prix affiché : « 1 400 FCFA/mois au lieu de 2 000 FCFA » en promotion. */
+    public static String prixTexte(Module m) {
+        String t = Tarif.fcfa(m.prixCompte) + "/mois";
+        if (m.enPromo()) t += " au lieu de " + Tarif.fcfa(m.prixNormal);
+        return t;
     }
 
     static String date(long t) {

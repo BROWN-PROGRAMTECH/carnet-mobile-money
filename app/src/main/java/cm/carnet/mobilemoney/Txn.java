@@ -66,7 +66,10 @@ public final class Txn {
     private static String e(String s) { return s.isEmpty() ? null : s; }
 
     public String typeLabel() {
+        // Lecture par une règle de l'assistant IA : « IA:<libellé> ».
+        if (type != null && type.startsWith("IA:")) return type.substring(3);
         switch (type) {
+            case "CARTE_VIRTUELLE": return "Recharge carte virtuelle";
             case "TRANSFERT_RECU": return "Transfert reçu";
             case "TRANSFERT_ENVOYE": return "Transfert envoyé";
             case "TRANSFERT": return "Transfert";

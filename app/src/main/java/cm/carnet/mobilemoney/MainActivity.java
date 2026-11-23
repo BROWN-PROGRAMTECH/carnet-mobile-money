@@ -90,6 +90,8 @@ public class MainActivity extends Activity {
     private final Runnable hideNotice = () -> noticeText.setVisibility(View.GONE);
 
     // Champs de saisie conservés d'un affichage à l'autre (sinon un nouveau SMS effacerait la saisie en cours).
+    private EditText codePromoField;
+    private TextView rechargeBonusInfo;
     private EditText rechargeMontant, rechargeMontantManuel, rechargeRef, phoneField, secretField, ownerField, omField, momoField, banquesField;
     private CheckBox agentOmBox, agentMomoBox, autoBox;
 
@@ -122,6 +124,14 @@ public class MainActivity extends Activity {
     /** Applications (0.11) : état en mémoire, écran du catalogue, choix à l'inscription. */
     private Modules.Etat etatModules;
     private boolean applicationsOuvert, choixModules, alertesChargees;
+    /** Agent IA (0.13) : propositions de l'IA en ligne, conversation avec l'assistant. */
+    private final Map<String, Classeur.Proposition> propositionsIa = new HashMap<>();
+    private Map<String, Classeur.Proposition> propsCourantes = new HashMap<>();
+    private boolean assistantOuvert, assistantAttente;
+    private final List<String[]> conversation = new ArrayList<>();
+    private org.json.JSONArray historiqueIa = new org.json.JSONArray();
+    private EditText questionChamp;
+    private String iaCompteur;
     private int profilChoisi = -1;
     private final java.util.Set<String> cochees = new java.util.LinkedHashSet<>();
     private int categorieSens = 1;
@@ -1136,7 +1146,8 @@ public class MainActivity extends Activity {
             case PAGE_EXPORT: exportPage(); break;
             case PAGE_COMPTE: if (applicationsOuvert) applicationsPage(); else comptePage(); break;
             case PAGE_FINANCES:
-                if (suiviOuvert != null) suiviPage();
+                if (assistantOuvert) assistantPage();
+                else if (suiviOuvert != null) suiviPage();
                 else if (personneOuverte != null) personnePage();
                 else if (categorieOuverte != null) categoriePage();
                 else financesPage();
@@ -1216,6 +1227,8 @@ public class MainActivity extends Activity {
             page.addView(empty("Ouverture de votre caisse…"));
             return;
         }
+        View fx = bandeauFauxSms();
+        if (fx != null) page.addView(fx, fill());
         View bm = bandeauModules();
         if (bm != null) page.addView(bm, fill());
         page.addView(heroCard(bilan), fill());
@@ -1841,6 +1854,7 @@ public class MainActivity extends Activity {
         page.addView(nav, fill());
         if (result == null) { page.addView(empty("Ouverture de vos finances…")); return; }
 
+        if (Cloud.configured() && Cloud.loggedIn(this) && visible(Modules.ASSISTANT)) page.addView(assistantCard(), fill());
         Caisse.Bilan b = computeBilan(debut, fin);
         if (acces(Modules.FINANCES) == Modules.Acces.ABSENT) {
             // Base gratuite : entrées et dépenses par catégorie ; le reste est proposé.
@@ -2156,6 +2170,8 @@ public class MainActivity extends Activity {
         Caisse.Total x = bilan.total(null);
         page.addView(text(bilan.aClasser.size() + " opération(s) · +" + SmsParser.fmt(x.entrees) + " / −" + SmsParser.fmt(x.sorties)
                 + " FCFA. Un toucher sur la catégorie suffit ; touchez l'opération pour ajouter un motif.", 13, MUTED, false));
+        propsCourantes = propositions();
+        enteteClassementIa(propsCourantes);
         LinearLayout list = listCard();
         int n = 0;
         for (Caisse.Ligne l : bilan.aClasser) {
@@ -2283,6 +2299,16 @@ public class MainActivity extends Activity {
         return row;
     }
 
+    /** « Bonus : +500 FCFA → 5 500 FCFA » sous le montant, si une promotion de recharge s'applique. */
+    private void majBonusRecharge() {
+        if (rechargeBonusInfo == null || rechargeMontant == null) return;
+        long saisi = 0;
+        try { saisi = Long.parseLong(rechargeMontant.getText().toString().trim()); } catch (Exception ignored) {}
+        long b = mods().bonusRecharge(saisi);
+        rechargeBonusInfo.setText(b > 0 ? "Bonus : +" + Tarif.fcfa(b) + " → " + Tarif.fcfa(saisi + b) + " sur votre porte-monnaie." : "");
+        rechargeBonusInfo.setVisibility(b > 0 ? View.VISIBLE : View.GONE);
+    }
+
     private void rechargeForm(LinearLayout card, Cloud.Portefeuille w) {
         card.addView(divider());
         if (w.numeroOm.isEmpty() && w.numeroMomo.isEmpty()) {
@@ -2300,14 +2326,29 @@ public class MainActivity extends Activity {
         } else {
             // 1. Opérateur  2. Montant  3. Payer : le menu de l'opérateur s'ouvre, l'ID sera relevé tout seul.
             card.addView(label("Recharger en un geste"));
+            Modules.Promo bonus = mods().meilleurBonus();
+            if (bonus != null) {
+                TextView bt = text("Promotion : " + Modules.promoTexte(mods(), bonus) + ".", 13, GOOD, true);
+                bt.setBackground(box(GOOD_BG, 0, 10));
+                bt.setPadding(dp(12), dp(8), dp(12), dp(8));
+                card.addView(bt, fill());
+            }
             if (!w.numeroOm.isEmpty() && !w.numeroMomo.isEmpty()) {
                 card.addView(segmented(new String[] {"Orange Money", "MTN MoMo"}, om ? 0 : 1, k -> { rechargeOp = k == 0 ? "OM" : "MOMO"; render(); }), fill());
             }
             if (rechargeMontant == null) {
                 rechargeMontant = amountField("Montant, en FCFA");
                 rechargeMontant.setInputType(InputType.TYPE_CLASS_NUMBER);
+                rechargeMontant.addTextChangedListener(new android.text.TextWatcher() {
+                    @Override public void beforeTextChanged(CharSequence x, int a1, int a2, int a3) {}
+                    @Override public void onTextChanged(CharSequence x, int a1, int a2, int a3) {}
+                    @Override public void afterTextChanged(android.text.Editable x) { majBonusRecharge(); }
+                });
             }
             card.addView(detach(rechargeMontant), fill());
+            rechargeBonusInfo = text("", 12, GOOD, true);
+            card.addView(rechargeBonusInfo, fill());
+            majBonusRecharge();
             LinearLayout vite = new LinearLayout(this);
             for (long m : new long[] {1000, 2000, 5000, 10000}) {
                 if (m < w.rechargeMin) continue;
@@ -2610,6 +2651,8 @@ public class MainActivity extends Activity {
         for (String f : t.flags) if (f.startsWith("!")) row.addView(text(f.substring(1), 12, BAD, true));
 
         if (quick) {
+            Classeur.Proposition prop = propsCourantes.get(Caisse.cle(t));
+            if (prop != null) row.addView(propositionRow(l, prop), fill());
             LinearLayout q = new LinearLayout(this);
             for (String c : rapides(t.sens)) {
                 q.addView(small(Caisse.court(c), catColor(c), v -> classer(t, c, l.motif, false)), weight(false));
@@ -2658,6 +2701,7 @@ public class MainActivity extends Activity {
         raw.setBackground(box(BG, 0, 10));
         raw.setPadding(dp(10), dp(8), dp(10), dp(8));
         row.addView(raw, fill());
+        if (u.kind == Txn.UNKNOWN) row.addView(lireParIa(u), fill());
         return row;
     }
 
@@ -3196,7 +3240,7 @@ public class MainActivity extends Activity {
         Modules.Abonnement a = e.abonnement(code);
         if (a == null || !a.essaiUtilise) return "Essayer " + e.essaiJours + " jours gratuits";
         if (a.fin > System.currentTimeMillis() + e.decalage) return a.renouveler ? "Active" : "Reprendre le renouvellement";
-        return "Activer · " + Tarif.fcfa(m != null ? m.prixCompte : 0) + "/mois";
+        return "Activer · " + (m != null ? Modules.prixTexte(m) : "");
     }
 
     /** Fenêtre de présentation d'une application qu'on n'a pas (ou plus). */
@@ -3212,7 +3256,8 @@ public class MainActivity extends Activity {
         Modules.Module pack = null;
         for (Modules.Module x : mods().catalogue) if (x.estPack && x.contenu.contains(code) && (pack == null || x.prixCompte < pack.prixCompte)) pack = x;
         String msg = (m != null ? m.description : "") + "\n\n" + Modules.etatTexte(mods(), code, System.currentTimeMillis())
-                + (m != null ? "\nPrix : " + Tarif.fcfa(m.prixCompte) + " par mois après l'essai." : "")
+                + (m != null ? "\nPrix : " + Modules.prixTexte(m) + " après l'essai" + (m.enPromo() ? " (" + m.promo + ")" : "") + "." : "")
+                + (m != null && m.annuel() ? "\nFormule annuelle : " + Tarif.fcfa(m.prixAnnuelCompte) + " par an." : "")
                 + (pack != null ? "\n\nAussi dans le " + pack.nom + " (" + Tarif.fcfa(pack.prixCompte) + "/mois)." : "");
         new AlertDialog.Builder(this)
                 .setTitle(nomModule(code))
@@ -3225,17 +3270,23 @@ public class MainActivity extends Activity {
 
     /** Active une application ou un pack ; confirme d'abord si de l'argent va être débité. */
     private void activer(String code) {
+        activer(code, "mois");
+    }
+
+    /** periode "an" : formule annuelle, payée tout de suite pour 12 mois. */
+    private void activer(String code, String periode) {
         Modules.Etat e = mods();
         Modules.Module m = e.module(code);
         Modules.Abonnement a = e.abonnement(code);
-        boolean payant = a != null && a.essaiUtilise && a.fin <= System.currentTimeMillis() + e.decalage;
+        boolean an = "an".equals(periode);
+        boolean payant = an || (a != null && a.essaiUtilise && a.fin <= System.currentTimeMillis() + e.decalage);
         Runnable go = () -> {
             notice("Activation de « " + nomModule(code) + " »…", 0);
             io.execute(() -> {
                 String msg;
                 int n;
                 try {
-                    msg = Cloud.activerModule(this, code);
+                    msg = Cloud.activerModule(this, code, periode);
                     n = 1;
                 } catch (Cloud.CloudException ex) {
                     msg = ex.getMessage();
@@ -3248,10 +3299,16 @@ public class MainActivity extends Activity {
         };
         if (!payant || m == null) { go.run(); return; }
         Cloud.Portefeuille w = Cloud.portefeuille(this);
+        long prix = an ? m.prixAnnuelCompte : m.prixCompte;
+        boolean enCours = a != null && a.fin > System.currentTimeMillis() + e.decalage;
         new AlertDialog.Builder(this)
-                .setTitle("Activer " + m.nom + " ?")
-                .setMessage(Tarif.fcfa(m.prixCompte) + " seront débités de votre porte-monnaie (solde : " + Tarif.fcfa(Math.max(0, w.solde)) + ").\n\n"
-                        + "L'application est active un mois et se renouvelle chaque mois si le solde suffit. Vous pouvez arrêter le renouvellement à tout moment.")
+                .setTitle((an ? "Formule annuelle : " : "Activer ") + m.nom + " ?")
+                .setMessage(Tarif.fcfa(prix) + " seront débités de votre porte-monnaie (solde : " + Tarif.fcfa(Math.max(0, w.solde)) + ").\n\n"
+                        + (an ? "L'application est active 12 mois" + (enCours ? " de plus, après la période en cours" : "")
+                                + (m.economieAnnuelle() > 0 ? " : vous économisez " + Tarif.fcfa(m.economieAnnuelle()) + " par rapport au mois" : "")
+                                + ". Elle se renouvelle chaque année si le solde suffit."
+                              : "L'application est active un mois et se renouvelle chaque mois si le solde suffit.")
+                        + " Vous pouvez arrêter le renouvellement à tout moment.")
                 .setPositiveButton("Activer", (d, x) -> go.run())
                 .setNegativeButton("Annuler", null)
                 .show();
@@ -3318,6 +3375,274 @@ public class MainActivity extends Activity {
         t.setPadding(dp(12), dp(9), dp(12), dp(9));
         t.setOnClickListener(v -> ouvrirApplications());
         return t;
+    }
+
+    // ---------- Agent IA (0.13) ----------
+
+    /** Propositions de catégorie pour les opérations à classer : apprises sur le téléphone, complétées par l'IA. */
+    private Map<String, Classeur.Proposition> propositions() {
+        Map<String, Classeur.Proposition> out = new HashMap<>();
+        if (result == null || bilan == null || !actif(Modules.ASSISTANT)) return out;
+        Classeur.Modele m = Classeur.apprendre(result, classements);
+        for (Classeur.Proposition p : Classeur.proposer(m, bilan.aClasser)) out.put(p.cle, p);
+        for (Map.Entry<String, Classeur.Proposition> e : propositionsIa.entrySet()) if (!out.containsKey(e.getKey())) out.put(e.getKey(), e.getValue());
+        return out;
+    }
+
+    /** En-tête de la page À classer : tout accepter, proposer avec l'IA ; ou présentation de l'application. */
+    private void enteteClassementIa(Map<String, Classeur.Proposition> props) {
+        if (!Cloud.configured()) return;
+        if (!visible(Modules.ASSISTANT)) {
+            if (bilan.aClasser.size() >= 5) page.addView(promoModule(Modules.ASSISTANT,
+                    "Laissez l'assistant proposer la catégorie de chaque opération (il apprend sur vos classements) et répondre à vos questions sur vos chiffres."), fill());
+            return;
+        }
+        if (!actif(Modules.ASSISTANT)) { page.addView(bandeauLecture(Modules.ASSISTANT), fill()); return; }
+        int surs = 0, sans = 0;
+        for (Caisse.Ligne l : bilan.aClasser) {
+            Classeur.Proposition p = l.sms == null ? null : props.get(Caisse.cle(l.sms));
+            if (p == null) sans++; else if (p.confiance >= 90) surs++;
+        }
+        LinearLayout act = new LinearLayout(this);
+        final int fs = surs;
+        if (surs > 0) act.addView(button("Tout accepter ≥ 90 % (" + surs + ")", true, v -> accepterTout(props, 90, fs)), weight(sans == 0));
+        if (sans > 0) act.addView(button("Proposer avec l'IA (" + Math.min(40, sans) + ")", surs == 0, v -> proposerIa(props)), weight(true));
+        if (act.getChildCount() > 0) page.addView(act, fill());
+    }
+
+    private void accepterTout(Map<String, Classeur.Proposition> props, int seuil, int nb) {
+        new AlertDialog.Builder(this)
+                .setTitle("Classer " + nb + " opération(s) ?")
+                .setMessage("Les opérations dont la proposition est sûre à " + seuil + " % au moins prennent la catégorie proposée. Vous pourrez toujours les corriger.")
+                .setPositiveButton("Classer", (d, w) -> io.execute(() -> {
+                    Store st = Store.get(this);
+                    int n = 0;
+                    for (Caisse.Ligne l : bilan.aClasser) {
+                        if (l.sms == null) continue;
+                        Classeur.Proposition p = props.get(Caisse.cle(l.sms));
+                        if (p == null || p.confiance < seuil) continue;
+                        st.classer(p.cle, p.categorie, l.motif);
+                        n++;
+                    }
+                    SyncJob.soon(this);
+                    final int fn = n;
+                    runOnUiThread(() -> { notice(fn + " opération(s) classée(s).", 1); reload(false); });
+                }))
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void proposerIa(Map<String, Classeur.Proposition> props) {
+        List<Txn> ops = new ArrayList<>();
+        for (Caisse.Ligne l : bilan.aClasser) {
+            if (l.sms == null || props.containsKey(Caisse.cle(l.sms))) continue;
+            if (ops.size() >= 40) break;
+            ops.add(l.sms);
+        }
+        if (ops.isEmpty()) return;
+        notice("L'assistant examine " + ops.size() + " opération(s)… (1 question)", 0);
+        io.execute(() -> {
+            String m;
+            int n;
+            try {
+                Map<String, Classeur.Proposition> r = Cloud.classerIa(this, ops);
+                runOnUiThread(() -> propositionsIa.putAll(r));
+                m = r.size() + " proposition(s) de l'assistant : vérifiez puis acceptez d'un toucher.";
+                n = 1;
+            } catch (Cloud.CloudException e) {
+                m = e.getMessage();
+                n = 2;
+            }
+            final String fm = m;
+            final int fn = n;
+            runOnUiThread(() -> { notice(fm, fn); render(); });
+        });
+    }
+
+    /** Ligne « Proposition : Vente 92 % · Accepter » sous une opération à classer. */
+    private View propositionRow(Caisse.Ligne l, Classeur.Proposition p) {
+        LinearLayout r = new LinearLayout(this);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setBackground(box(GOOD_BG, 0, 10));
+        r.setPadding(dp(10), dp(6), dp(10), dp(6));
+        r.addView(text("✨ " + Caisse.categorieNom(p.categorie) + " · " + p.confiance + " %" + ("ia".equals(p.source) ? " (IA)" : ""), 13, ACCENT, true),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        r.addView(small("Accepter", ACCENT, v -> classer(l.sms, p.categorie, l.motif, false)));
+        return r;
+    }
+
+    /** Bouton « Faire lire par l'IA » d'un SMS inconnu (gratuit, compte nécessaire). */
+    private View lireParIa(Txn u) {
+        return small("✨ Faire lire ce SMS par l'IA (gratuit)", ACCENT, v -> {
+            if (!Cloud.configured() || !Cloud.loggedIn(this)) { notice("Créez un compte (gratuit) pour faire lire vos SMS par l'IA.", 0); return; }
+            notice("L'IA lit le SMS (numéros et noms masqués)…", 0);
+            io.execute(() -> {
+                String m;
+                int n;
+                try { m = Cloud.lireSmsIa(this, u); n = m.startsWith("SMS compris") ? 1 : 0; } catch (Cloud.CloudException e) { m = e.getMessage(); n = 2; }
+                final String fm = m;
+                final int fn = n;
+                runOnUiThread(() -> { notice(fm, fn); reload(true); });
+            });
+        });
+    }
+
+    /** Bandeau rouge après un faux SMS de paiement (48 heures, ou jusqu'à fermeture). */
+    private View bandeauFauxSms() {
+        String v = Store.pref(this, "faux_sms", "");
+        int i = v.indexOf('|');
+        if (i <= 0) return null;
+        long quand;
+        try { quand = Long.parseLong(v.substring(0, i)); } catch (NumberFormatException e) { return null; }
+        if (System.currentTimeMillis() - quand > 48L * 3600 * 1000) return null;
+        LinearLayout b = column(4);
+        b.setBackground(box(BAD_BG, 0, 12));
+        b.setPadding(dp(12), dp(10), dp(12), dp(10));
+        b.addView(text("⚠  Faux SMS de paiement probable · " + when(quand), 14, BAD, true));
+        b.addView(text(v.substring(i + 1), 13, INK, false));
+        b.addView(small("J'ai compris", BAD, x -> { Store.savePref(this, "faux_sms", ""); render(); }));
+        return b;
+    }
+
+    // ----- Assistant qui répond -----
+
+    private View assistantCard() {
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("✨ Assistant IA", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (!actif(Modules.ASSISTANT)) head.addView(chip("Lecture seule", WARN, WARN_BG));
+        c.addView(head, fill());
+        c.addView(text("Posez une question sur vos chiffres : ventes de la semaine, plus grosses dépenses, qui vous doit…", 13, MUTED, false));
+        c.addView(button("Poser une question  ›", true, v -> { if (exiger(Modules.ASSISTANT)) ouvrirAssistant(); }), fill());
+        return c;
+    }
+
+    private void ouvrirAssistant() {
+        fermerDetail();
+        assistantOuvert = true;
+        pageIdx = PAGE_FINANCES;
+        render();
+    }
+
+    private static final String[] QUESTIONS_TYPES = {
+            "Combien j'ai vendu cette semaine ?",
+            "Quelles sont mes plus grosses dépenses du mois ?",
+            "Mon résultat est-il meilleur que le mois dernier ?",
+            "Qui me doit de l'argent ?",
+            "Comment améliorer mon résultat ?",
+    };
+
+    private void assistantPage() {
+        page.addView(retour("Finances"));
+        pageTitle("Assistant IA", "Vos chiffres restent masqués : l'IA ne voit ni SMS, ni noms, ni numéros");
+        LinearLayout fil = column(8);
+        if (conversation.isEmpty()) {
+            fil.addView(text("Bonjour ! Je réponds à partir de vos totaux (jour, semaine, 3 derniers mois, trésorerie, budgets, dettes). Exemples :", 14, INK, false));
+            for (String q : QUESTIONS_TYPES) {
+                TextView t = text("›  " + q, 14, ACCENT, true);
+                t.setPadding(0, dp(4), 0, dp(4));
+                t.setOnClickListener(v -> poserQuestion(q));
+                fil.addView(t, fill());
+            }
+        }
+        for (String[] m : conversation) {
+            boolean moi = "user".equals(m[0]);
+            TextView t = text(m[1], 14, moi ? Color.WHITE : INK, false);
+            t.setTextIsSelectable(!moi);
+            t.setBackground(box(moi ? ACCENT : SURFACE, moi ? 0 : LINE, 14));
+            t.setPadding(dp(12), dp(10), dp(12), dp(10));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.gravity = moi ? Gravity.END : Gravity.START;
+            if (moi) lp.setMarginStart(dp(40)); else lp.setMarginEnd(dp(24));
+            fil.addView(t, lp);
+        }
+        if (assistantAttente) fil.addView(text("L'assistant réfléchit…", 13, MUTED, false));
+        page.addView(fil, fill());
+        if (questionChamp == null) {
+            questionChamp = new EditText(this);
+            questionChamp.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+            questionChamp.setHint("Votre question…");
+        }
+        page.addView(detach(questionChamp), fill());
+        page.addView(button("Envoyer", true, v -> {
+            String q = questionChamp.getText().toString().trim();
+            if (!q.isEmpty()) poserQuestion(q);
+        }), fill());
+        if (iaCompteur != null) page.addView(text(iaCompteur, 12, MUTED, false));
+        if (!conversation.isEmpty()) page.addView(small("Nouvelle conversation", MUTED, v -> { conversation.clear(); historiqueIa = new org.json.JSONArray(); render(); }), fill());
+        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
+    }
+
+    /** Contexte masqué envoyé à l'IA (totaux seulement) et correspondance des noms gardée sur le téléphone. */
+    private Contexte.Resultat contexteIa() {
+        long now = System.currentTimeMillis();
+        List<String> libelles = new ArrayList<>();
+        List<Caisse.Bilan> mois = new ArrayList<>();
+        SimpleDateFormat mf = new SimpleDateFormat("MMMM yyyy", Locale.FRANCE);
+        for (int k = 0; k > -3; k--) {
+            long d = Finances.debutMois(now, k);
+            long f = k == 0 ? now : Finances.debutMois(now, k + 1) - 1;
+            libelles.add((k == 0 ? "Mois en cours (" : "Mois de ") + mf.format(new Date(d)) + (k == 0 ? ")" : ""));
+            mois.add(computeBilan(d, f));
+        }
+        Calendar c = Calendar.getInstance();
+        c.setTimeInMillis(now);
+        c.set(Calendar.HOUR_OF_DAY, 0);
+        c.set(Calendar.MINUTE, 0);
+        c.set(Calendar.SECOND, 0);
+        c.set(Calendar.MILLISECOND, 0);
+        long debutJour = c.getTimeInMillis();
+        Caisse.Bilan jour = computeBilan(debutJour, now);
+        Caisse.Bilan semaine = computeBilan(debutJour - 6L * 86400000, now);
+        Finances.Tresorerie tr = Finances.tresorerie(result, jour.especes, Store.get(this).avoirs());
+        Dettes.Bilan d = visible(Modules.DETTES) ? Dettes.calculer(engagements, now) : null;
+        List<Suivi.Source> s = visible(Modules.SUIVI) ? sourcesSuivies() : null;
+        String nom = Cloud.caisseNom(this).isEmpty() ? "Ma caisse" : Cloud.caisseNom(this);
+        return Contexte.construire(nom, now, libelles, mois, semaine, jour, tr, Store.get(this).budgets(), d, s);
+    }
+
+    private void poserQuestion(String q) {
+        if (assistantAttente || result == null) return;
+        if (!exiger(Modules.ASSISTANT)) return;
+        if (questionChamp != null) questionChamp.setText("");
+        conversation.add(new String[] {"user", q});
+        assistantAttente = true;
+        render();
+        Contexte.Resultat ctx = contexteIa();
+        final org.json.JSONArray histo = historiqueIa;
+        io.execute(() -> {
+            String rep;
+            String compteur = null;
+            boolean ok;
+            try {
+                String[] r = Cloud.questionIa(this, q, ctx.texte.toString(), histo);
+                try {
+                    org.json.JSONObject u = new org.json.JSONObject();
+                    u.put("role", "user");
+                    u.put("texte", q);
+                    org.json.JSONObject a = new org.json.JSONObject();
+                    a.put("role", "assistant");
+                    a.put("texte", r[0]);
+                    histo.put(u);
+                    histo.put(a);
+                } catch (Exception ignored) {}
+                rep = Contexte.demasquer(r[0], ctx.noms);
+                compteur = r[1] + " question(s) sur " + r[2] + " ce mois-ci.";
+                ok = true;
+            } catch (Cloud.CloudException e) {
+                rep = e.getMessage();
+                ok = false;
+            }
+            final String fr = rep, fc = compteur;
+            final boolean fok = ok;
+            runOnUiThread(() -> {
+                assistantAttente = false;
+                if (fok) { conversation.add(new String[] {"assistant", fr}); if (fc != null) iaCompteur = fc; }
+                else { conversation.remove(conversation.size() - 1); notice(fr, 2); }
+                render();
+            });
+        });
     }
 
     // ---------- Alertes WhatsApp (0.12) ----------
@@ -3599,6 +3924,29 @@ public class MainActivity extends Activity {
             page.addView(t, fill());
         }
 
+        if (!e.promos.isEmpty()) {
+            LinearLayout pc = card();
+            pc.setBackground(box(GOOD_BG, 0, 14));
+            pc.addView(text("Vos promotions", 15, GOOD, true));
+            for (Modules.Promo p : e.promos) {
+                pc.addView(text("• " + p.nom + " : " + Modules.promoTexte(e, p), 13, INK, true));
+                if (!p.description.isEmpty()) pc.addView(text(p.description, 12, MUTED, false));
+            }
+            pc.addView(text("La réduction est appliquée toute seule au paiement ; les prix ci-dessous en tiennent compte.", 12, MUTED, false));
+            page.addView(pc, fill());
+        }
+        LinearLayout cp = card();
+        cp.addView(text("J'ai un code promo", 14, INK, true));
+        if (codePromoField == null) {
+            codePromoField = new EditText(this);
+            codePromoField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+            codePromoField.setSingleLine(true);
+            codePromoField.setHint("Ex. RENTREE30");
+        }
+        cp.addView(detach(codePromoField), fill());
+        cp.addView(button("Utiliser le code", false, v -> utiliserCode()), fill());
+        page.addView(cp, fill());
+
         LinearLayout base = card();
         LinearLayout bh = new LinearLayout(this);
         bh.setGravity(Gravity.CENTER_VERTICAL);
@@ -3614,7 +3962,33 @@ public class MainActivity extends Activity {
         page.addView(label("Applications"));
         for (Modules.Module m : e.catalogue) if (!m.estPack) page.addView(moduleTuile(m, now), fill());
         page.addView(text("Chaque application démarre par " + e.essaiJours + " jours d'essai gratuit, puis se paie au mois depuis votre porte-monnaie. "
+                + "La formule annuelle se paie en une fois, sans essai. "
                 + "Non renouvelée, elle passe en lecture seule : vous gardez toutes vos données. L'export Excel est inclus avec Finances & budgets.", 12, MUTED, false));
+    }
+
+    private void utiliserCode() {
+        String code = codePromoField.getText().toString().trim();
+        if (code.length() < 3) { notice("Saisissez le code promo reçu.", 2); return; }
+        notice("Vérification du code…", 0);
+        io.execute(() -> {
+            String msg;
+            int n;
+            try {
+                msg = Cloud.utiliserCode(this, code);
+                n = 1;
+            } catch (Cloud.CloudException ex) {
+                msg = ex.getMessage();
+                n = 2;
+            }
+            final String fm = msg;
+            final int fn = n;
+            runOnUiThread(() -> {
+                if (fn == 1) codePromoField.setText("");
+                etatModules = Cloud.modules(this);
+                notice(fm, fn);
+                render();
+            });
+        });
     }
 
     private View moduleTuile(Modules.Module m, long now) {
@@ -3633,13 +4007,16 @@ public class MainActivity extends Activity {
         head.addView(ic, il);
         LinearLayout tx = column(1);
         tx.addView(text(m.nom, 15, INK, true));
-        String prix = Tarif.fcfa(m.prixCompte) + " / mois" + (m.parTelephone ? " (" + Tarif.fcfa(m.prix) + " par téléphone en plus)" : "");
-        if (m.estPack) {
+        String prix = Modules.prixTexte(m) + (m.parTelephone ? " (" + Tarif.fcfa(m.prix) + " par téléphone en plus)" : "");
+        if (m.estPack && !m.enPromo()) {
             long separes = 0;
             for (String x : m.contenu) { Modules.Module y = e.module(x); if (y != null) separes += y.prixCompte; }
             if (separes > m.prixCompte) prix += " au lieu de " + Tarif.fcfa(separes);
         }
         tx.addView(text(prix, 13, ACCENT, true));
+        if (m.enPromo()) tx.addView(text("Promotion : " + m.promo, 12, GOOD, true));
+        if (m.annuel()) tx.addView(text("ou " + Tarif.fcfa(m.prixAnnuelCompte) + " par an"
+                + (m.economieAnnuelle() > 0 ? " (" + Tarif.fcfa(m.economieAnnuelle()) + " d'économie)" : ""), 12, MUTED, false));
         head.addView(tx, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         c.addView(head, fill());
         c.addView(text(m.description, 13, MUTED, false));
@@ -3653,6 +4030,9 @@ public class MainActivity extends Activity {
             act.addView(button(boutonModule(m.code), true, v -> activer(m.code)), weight(true));
         }
         c.addView(act, fill());
+        if (m.annuel() && !(a != null && "an".equals(a.periode) && a.fin > now + e.decalage)) {
+            c.addView(button("Passer à l'année · " + Tarif.fcfa(m.prixAnnuelCompte), false, v -> activer(m.code, "an")), fill());
+        }
         return c;
     }
 
@@ -3688,7 +4068,7 @@ public class MainActivity extends Activity {
                 Modules.Module m = e.module(code);
                 if (m == null) continue;
                 CheckBox cb = new CheckBox(this);
-                cb.setText(m.nom + " · " + Tarif.fcfa(m.prixCompte) + "/mois");
+                cb.setText(m.nom + " · " + Modules.prixTexte(m));
                 cb.setChecked(cochees.contains(code));
                 cb.setOnClickListener(v -> { if (cb.isChecked()) cochees.add(code); else cochees.remove(code); render(); });
                 l.addView(cb, fill());
@@ -3910,8 +4290,9 @@ public class MainActivity extends Activity {
 
     /** Ferme un écran de détail (suivi, personne, catégorie) ; vrai s'il y en avait un. */
     private boolean fermerDetail() {
-        boolean ouvert = suiviOuvert != null || personneOuverte != null || categorieOuverte != null || applicationsOuvert;
+        boolean ouvert = suiviOuvert != null || personneOuverte != null || categorieOuverte != null || applicationsOuvert || assistantOuvert;
         applicationsOuvert = false;
+        assistantOuvert = false;
         suiviOuvert = null;
         personneOuverte = null;
         categorieOuverte = null;
