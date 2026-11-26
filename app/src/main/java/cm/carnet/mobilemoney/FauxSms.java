@@ -40,4 +40,32 @@ public final class FauxSms {
         }
         return null;
     }
+
+    /**
+     * Niveau 2 (version 0.17) : paiement reçu d'un expéditeur officiel (OM ou MoMo) qui ne suit pas la chaîne des soldes.
+     * Un faux SMS (expéditeur imité) annonce un solde que l'escroc ne connaît pas ; un SMS renvoyé réutilise un ID déjà vu.
+     * Renvoie la raison du doute, ou null si le paiement est cohérent (ou invérifiable faute de solde précédent).
+     * @param soldePrecedent dernier solde connu de ce compte (centimes), ou null
+     * @param idsVus         ID de transaction déjà reçus sur ce compte
+     */
+    public static String chaine(Txn t, Long soldePrecedent, java.util.Collection<String> idsVus) {
+        if (t == null || t.kind != Txn.TX || t.sens <= 0 || t.isBalanceCheck() || t.montant <= 0) return null;
+        if (!Caisse.OM.equals(t.op) && !Caisse.MOMO.equals(t.op)) return null;
+        String ussd = Caisse.MOMO.equals(t.op) ? "*126#" : "#150#";
+        String montant = SmsParser.fmt(t.montant) + " FCFA";
+        if (t.txnId != null && idsVus != null && idsVus.contains(t.txnId)) {
+            return "Paiement de " + montant + " non confirmé : l'ID de transaction " + t.txnId + " a déjà été reçu. "
+                    + "Un SMS renvoyé ou copié ne prouve pas un nouveau paiement. Vérifiez votre solde (" + ussd + ") avant de livrer.";
+        }
+        if (t.solde == null || soldePrecedent == null) return null;
+        long attendu = soldePrecedent + t.montant - t.frais;
+        if (Math.abs(t.solde - attendu) <= 100) return null;
+        if (t.solde.longValue() == soldePrecedent.longValue()) {
+            return "Paiement de " + montant + " non confirmé : le solde annoncé (" + SmsParser.fmt(t.solde) + ") n'a pas bougé depuis votre dernier SMS "
+                    + Txn.opName(t.op) + ". Vérifiez votre solde (" + ussd + ") avant de livrer.";
+        }
+        return "Paiement de " + montant + " non confirmé : le nouveau solde annoncé (" + SmsParser.fmt(t.solde) + ") ne suit pas votre dernier solde "
+                + Txn.opName(t.op) + " (" + SmsParser.fmt(soldePrecedent) + " + " + SmsParser.fmt(t.montant) + " = " + SmsParser.fmt(attendu) + "). "
+                + "Faux SMS ou SMS manquant : vérifiez votre solde (" + ussd + ") avant de livrer.";
+    }
 }

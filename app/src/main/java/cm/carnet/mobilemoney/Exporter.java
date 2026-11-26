@@ -48,6 +48,19 @@ public final class Exporter {
     /** Avec, en plus, les dettes et créances par personne (version 0.10). */
     public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now,
                               Finances.Tresorerie tresorerie, Map<String, Long> budgets, Dettes.Bilan dettes) throws IOException {
+        return xlsx(r, bilan, from, to, periodLabel, now, tresorerie, budgets, dettes, null);
+    }
+
+    /** Avec les soldes de la période (version 0.15) : une colonne par compte et le total après chaque opération. */
+    public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now,
+                              Finances.Tresorerie tresorerie, Map<String, Long> budgets, Dettes.Bilan dettes, Soldes.Releve rv) throws IOException {
+        return xlsx(r, bilan, from, to, periodLabel, now, tresorerie, budgets, dettes, rv, null);
+    }
+
+    /** Avec la feuille « Analyse » (version 0.16), si l'application Analyse est active. */
+    public static byte[] xlsx(Analyzer.Result r, Caisse.Bilan bilan, long from, long to, String periodLabel, long now,
+                              Finances.Tresorerie tresorerie, Map<String, Long> budgets, Dettes.Bilan dettes, Soldes.Releve rv,
+                              Analyse.Rapport analyse) throws IOException {
         XlsxWriter w = new XlsxWriter();
 
         XlsxWriter.Sheet s = w.sheet("Synthèse", 28, 16, 16, 12, 16, 16, 14, 14, 14).noHeader();
@@ -77,24 +90,22 @@ public final class Exporter {
                 fcfa(e.theo), fcfa(e.compte), fcfa(e.ecart));
         if (!e.origineOuverture.isEmpty()) s.row("Ouverture des espèces", e.origineOuverture);
         s.row();
+        if (rv != null && !rv.comptes.isEmpty()) {
+            s.row("**Soldes de la période", "**Ouverture", "**Clôture", "**Variation");
+            for (String k : rv.comptes)
+                s.row(Soldes.nom(k), fcfa(rv.ouverture.get(k)), fcfa(rv.cloture.get(k)), fcfa(rv.variation(k)));
+            s.row("**Total", fcfa(rv.totalOuverture), fcfa(rv.totalCloture), fcfa(rv.variationTotale()));
+            s.row("Détail", "Feuille « Journal de caisse » : solde de chaque compte et total après chaque opération.");
+            s.row();
+        }
         s.row("**Comment lire");
         s.row("Montants", "Lus dans les SMS de l'opérateur, non modifiables. Seuls la catégorie et le motif sont déclarés par l'utilisateur.");
         s.row("Solde théorique", "Comptes OM et MoMo : ouverture + entrées − sorties − frais d'après les SMS. Un écart signale un SMS manquant.");
         s.row("Espèces", "Fond de caisse + entrées − sorties saisies (+ dépôts − retraits clients en mode agent), comparé au comptage.");
+        if (rv != null) s.row("Journal de caisse", "Toutes les opérations de la période dans l'ordre (SMS et espèces), avec le solde de chaque compte et le total après chacune, entre l'ouverture et la clôture.");
 
-        XlsxWriter.Sheet j = w.sheet("Journal de caisse", 17, 14, 20, 9, 13, 11, 14, 24, 12, 24, 16, 30, 36);
-        j.row("Date", "Compte", "Type", "Sens", "Montant (FCFA)", "Frais (FCFA)", "Solde après (FCFA)", "Contrepartie", "Numéro",
-                "ID transaction", "Catégorie", "Motif", "Contrôle");
-        List<Caisse.Ligne> asc = new ArrayList<>(bilan.lignes);
-        Collections.reverse(asc);
-        for (Caisse.Ligne l : asc) {
-            Txn t = l.sms;
-            j.row(new Date(t.date), Txn.opName(t.op), t.typeLabel(), sens(t), fcfa(t.montant), t.frais == 0 ? null : fcfa(t.frais),
-                    fcfa(t.solde != null ? t.solde : t.apres), t.nom, t.numero, t.txnId,
-                    Caisse.categorieNom(l.categorie) + (l.auto ? " (auto)" : "")
-                            + (l.reparti > 0 ? " · réparti " + SmsParser.fmt(l.reparti) + (l.reste() > 0 ? ", reste " + SmsParser.fmt(l.reste()) : "") : ""),
-                    l.motif, controle(t));
-        }
+        if (rv != null) journalSoldes(w, rv, bilan);
+        else journalSimple(w, bilan);
 
         XlsxWriter.Sheet c = w.sheet("À classer", 17, 14, 20, 9, 13, 24, 12, 24);
         c.row("Date", "Compte", "Type", "Sens", "Montant (FCFA)", "Contrepartie", "Numéro", "ID transaction");
@@ -105,13 +116,15 @@ public final class Exporter {
             c.row(new Date(t.date), Txn.opName(t.op), t.typeLabel(), sens(t), fcfa(t.montant), t.nom, t.numero, t.txnId);
         }
 
-        XlsxWriter.Sheet es = w.sheet("Espèces", 17, 10, 13, 16, 30, 12);
-        es.row("Date", "Sens", "Montant (FCFA)", "Catégorie", "Libellé", "Statut");
+        XlsxWriter.Sheet es = w.sheet("Espèces", 17, 10, 13, 16, 30, 12, 16);
+        es.row("Date", "Sens", "Montant (FCFA)", "Catégorie", "Libellé", "Statut", "Espèces après (FCFA)");
         List<Caisse.Saisie> me = new ArrayList<>(bilan.mouvementsEspeces);
         Collections.reverse(me);
-        for (Caisse.Saisie x : me)
+        for (Caisse.Saisie x : me) {
+            Soldes.Ligne sl = rv != null ? rv.parSaisie.get(x) : null;
             es.row(new Date(x.date), x.sens > 0 ? "Entrée" : "Sortie", fcfa(x.montant), Caisse.categorieNom(Caisse.normaliserSaisie(x.categorie, x.sens)), x.libelle,
-                    x.annule ? "Annulée" : "Valide");
+                    x.annule ? "Annulée" : "Valide", sl != null ? fcfa(sl.solde(Soldes.ESPECES)) : null);
+        }
 
         if (!bilan.depensesSuivies.isEmpty()) {
             XlsxWriter.Sheet ds = w.sheet("Dépenses suivies", 17, 13, 24, 30, 28, 12);
@@ -147,7 +160,7 @@ public final class Exporter {
         if (tresorerie != null || budgets != null) {
             XlsxWriter.Sheet f = w.sheet("Finances", 32, 18, 18, 14).noHeader();
             if (tresorerie != null) {
-                f.row("**Trésorerie au moment de l'export", new Date(now));
+                f.row(rv != null ? "**Trésorerie à la fin de la période" : "**Trésorerie au moment de l'export", new Date(Math.min(now, to)));
                 f.row("**Poste", "**Montant (FCFA)", "**Information du");
                 for (Finances.Poste p : tresorerie.postes) {
                     f.row(p.nom + (p.manuel ? " (saisi)" : ""), fcfa(p.montant), p.date > 0 ? new Date(p.date) : null);
@@ -173,7 +186,184 @@ public final class Exporter {
                 }
             }
         }
+        if (analyse != null) feuilleAnalyse(w, analyse);
         return w.bytes();
+    }
+
+    /** Feuille « Analyse » : évolution, ventes, dépenses, prévisions, alertes et budgets. */
+    static void feuilleAnalyse(XlsxWriter w, Analyse.Rapport a) {
+        XlsxWriter.Sheet s = w.sheet("Analyse", 34, 16, 16, 16, 16, 18).noHeader();
+        s.row("**Analyse", "Calculée le", new Date(a.now));
+        s.row();
+        s.row("**À surveiller");
+        if (a.alertes.isEmpty()) s.row("Aucune alerte.");
+        for (String x : a.alertes) s.row(x);
+        s.row();
+        s.row("**Ce mois, à ce rythme", "**Jour " + a.joursEcoules + " / " + a.joursMois);
+        s.row("**", "**Déjà fait (FCFA)", "**Prévu fin du mois", "**Moyenne 3 mois", "**Écart (%)");
+        s.row("Ventes", fcfa(a.ventesMois), fcfa(a.ventesProjetees), fcfa(a.moyVentes), a.ecartVentes == null ? null : (Object) (long) a.ecartVentes);
+        s.row("Dépenses (frais compris)", fcfa(a.depensesMois), fcfa(a.depensesProjetees), fcfa(a.moyDepenses), a.ecartDepenses == null ? null : (Object) (long) a.ecartDepenses);
+        s.row("Trésorerie", fcfa(a.tresorerie), fcfa(a.tresoreriePrevue));
+        if (a.fluxJour != null) s.row("Évolution moyenne par jour (30 derniers jours)", fcfa(a.fluxJour));
+        if (a.dateManque != null) s.row("Comptes vides vers le", new Date(a.dateManque));
+        s.row();
+        s.row("**Évolution sur 12 mois", "**Ventes (FCFA)", "**Dépenses (FCFA)", "**Frais (FCFA)", "**Résultat (FCFA)", "**Trésorerie fin (FCFA)");
+        for (Analyse.Mois m : a.mois) {
+            if (m.vide) continue;
+            s.row(m.nom + (m.enCours ? " (en cours)" : ""), fcfa(m.chiffres.ventes), fcfa(m.chiffres.depenses), fcfa(m.chiffres.frais),
+                    fcfa(m.chiffres.resultat), fcfa(m.tresorerie));
+        }
+        s.row();
+        s.row("**Ventes · 90 derniers jours", "**Nombre", "**Montant (FCFA)");
+        s.row("Total", (long) a.nbVentes, fcfa(a.totalVentes));
+        s.row("Panier moyen", null, fcfa(a.panierMoyen));
+        for (int i = 0; i < 7; i++) s.row(Analyse.JOURS[i], (long) a.nbJour[i], fcfa(a.ventesJour[i]));
+        for (int i = 0; i < 6; i++) s.row(Analyse.TRANCHES[i], (long) a.nbTranche[i], fcfa(a.ventesTranche[i]));
+        s.row("Clients sur 90 jours", (long) a.clients);
+        s.row("Clients fidèles (2 des 3 derniers mois)", (long) a.fideles);
+        s.row("Nouveaux clients (30 jours)", (long) a.nouveaux);
+        s.row("Clients perdus (rien depuis 45 jours)", (long) a.perdus);
+        for (Analyse.Item it : a.clientsPerdus) s.row("   " + (it.nom != null && !it.nom.trim().isEmpty() ? it.nom.trim() : it.numero), (long) it.nombre, fcfa(it.montant), new Date(it.derniere));
+        s.row();
+        s.row("**Dépenses · 90 derniers jours", "**Nombre", "**Montant (FCFA)", "**Par mois (FCFA)");
+        for (Analyse.Item it : a.postes) s.row(it.nom, (long) it.nombre, fcfa(it.montant), fcfa(it.montant / 3));
+        s.row("Frais opérateur", null, fcfa(a.frais), a.fraisPourcent() + " % des sorties");
+        if (!a.beneficiaires.isEmpty()) {
+            s.row("**À qui vous payez le plus", "**Nombre", "**Montant (FCFA)");
+            for (Analyse.Item it : a.beneficiaires) s.row(it.nom != null ? it.nom : it.numero, (long) it.nombre, fcfa(it.montant));
+        }
+        if (!a.inhabituelles.isEmpty()) {
+            s.row("**Dépenses inhabituelles (30 jours)", "**Date", "**Montant (FCFA)", "**Habituel (FCFA)", "**Contrepartie");
+            for (Analyse.Inhabituelle x : a.inhabituelles)
+                s.row(Caisse.categorieNom(x.poste), new Date(x.sms.date), fcfa(x.montant), fcfa(x.habituel), x.sms.nom != null ? x.sms.nom : x.sms.numero);
+        }
+        s.row();
+        s.row("**Budgets", "**Budget actuel", "**Dépensé ce mois", "**Prévu fin du mois", "**Moyenne 3 mois", "**Budget proposé");
+        for (Analyse.BudgetSuivi b : a.budgets)
+            s.row(Caisse.categorieNom(b.poste), b.budget > 0 ? fcfa(b.budget) : null, fcfa(b.depense), fcfa(b.projection), fcfa(b.moyenne), b.propose > 0 ? fcfa(b.propose) : null);
+        s.row("Budget proposé", "Moyenne des dépenses des 3 derniers mois avec activité, arrondie aux 500 FCFA au-dessus.");
+    }
+
+    /** Journal d'avant la version 0.15 : solde du compte de la ligne seulement. */
+    private static void journalSimple(XlsxWriter w, Caisse.Bilan bilan) {
+        XlsxWriter.Sheet j = w.sheet("Journal de caisse", 17, 14, 20, 9, 13, 11, 14, 24, 12, 24, 16, 30, 36);
+        j.row("Date", "Compte", "Type", "Sens", "Montant (FCFA)", "Frais (FCFA)", "Solde après (FCFA)", "Contrepartie", "Numéro",
+                "ID transaction", "Catégorie", "Motif", "Contrôle");
+        List<Caisse.Ligne> asc = new ArrayList<>(bilan.lignes);
+        Collections.reverse(asc);
+        for (Caisse.Ligne l : asc) {
+            Txn t = l.sms;
+            j.row(new Date(t.date), Txn.opName(t.op), t.typeLabel(), sens(t), fcfa(t.montant), t.frais == 0 ? null : fcfa(t.frais),
+                    fcfa(t.solde != null ? t.solde : t.apres), t.nom, t.numero, t.txnId,
+                    Caisse.categorieNom(l.categorie) + (l.auto ? " (auto)" : "")
+                            + (l.reparti > 0 ? " · réparti " + SmsParser.fmt(l.reparti) + (l.reste() > 0 ? ", reste " + SmsParser.fmt(l.reste()) : "") : ""),
+                    l.motif, controle(t));
+        }
+
+    }
+
+    /**
+     * Journal de la période (version 0.15) : opérations SMS, espèces, fonds et comptages dans l'ordre, avec le solde
+     * de chaque compte et le total après chaque ligne, encadrés par l'ouverture et la clôture.
+     */
+    private static void journalSoldes(XlsxWriter w, Soldes.Releve rv, Caisse.Bilan bilan) {
+        int n = rv.comptes.size();
+        double[] larg = new double[13 + n];
+        double[] avant = {17, 14, 20, 9, 13, 11};
+        double[] apres = {24, 12, 24, 16, 30, 36};
+        System.arraycopy(avant, 0, larg, 0, 6);
+        for (int i = 0; i < n; i++) larg[6 + i] = 15;
+        larg[6 + n] = 16;
+        System.arraycopy(apres, 0, larg, 7 + n, 6);
+        XlsxWriter.Sheet j = w.sheet("Journal de caisse", larg);
+        List<Object> h = new ArrayList<>(java.util.Arrays.asList("Date", "Compte", "Type", "Sens", "Montant (FCFA)", "Frais (FCFA)"));
+        for (String k : rv.comptes) h.add("Solde " + Soldes.court(k) + " (FCFA)");
+        h.add("Total (FCFA)");
+        h.addAll(java.util.Arrays.asList("Contrepartie", "Numéro", "ID transaction", "Catégorie", "Motif", "Contrôle"));
+        j.row(h.toArray());
+
+        j.row(ligneSoldes(rv.from > 0 ? new Date(rv.from) : null, "**Ouverture", "Solde au début de la période", rv, rv.ouverture, rv.totalOuverture));
+        for (Soldes.Ligne l : rv.lignes) {
+            String sensL = "", type, categorie = "", motif = "", controle = "OK", contrepartie = null, numero = null, id = null;
+            Long montant, frais = null;
+            switch (l.nature) {
+                case Soldes.FOND:
+                    type = "Fond de caisse";
+                    montant = l.jour.fond;
+                    if (l.variation != 0) controle = "Écart avec le solde précédent : " + (l.variation > 0 ? "+" : "") + SmsParser.fmt(l.variation);
+                    break;
+                case Soldes.COMPTAGE:
+                    type = "Comptage de caisse";
+                    montant = l.jour.compte;
+                    controle = l.variation == 0 ? "Aucun écart" : "Écart de caisse : " + (l.variation > 0 ? "+" : "") + SmsParser.fmt(l.variation);
+                    motif = l.jour.note == null ? "" : l.jour.note;
+                    break;
+                case Soldes.MOUVEMENT_ESPECES: {
+                    Caisse.Saisie x = l.saisie;
+                    type = "Mouvement d'espèces";
+                    sensL = x.sens > 0 ? "Entrée" : "Sortie";
+                    montant = x.montant;
+                    categorie = Caisse.categorieNom(Caisse.normaliserSaisie(x.categorie, x.sens));
+                    motif = x.libelle;
+                    break;
+                }
+                case Soldes.CONSULTATION:
+                    type = l.sms.typeLabel();
+                    sensL = "Contrôle";
+                    montant = null;
+                    controle = "Solde corrigé de " + (l.variation > 0 ? "+" : "") + SmsParser.fmt(l.variation) + " par le solde lu (SMS manquant ?)";
+                    break;
+                default: {
+                    Txn t = l.sms;
+                    type = t.typeLabel();
+                    sensL = sens(t);
+                    montant = t.montant;
+                    frais = t.frais == 0 ? null : t.frais;
+                    contrepartie = t.nom;
+                    numero = t.numero;
+                    id = t.txnId;
+                    controle = controle(t);
+                    Caisse.Ligne cl = bilan.parSms.get(t);
+                    if (cl != null) {
+                        categorie = Caisse.categorieNom(cl.categorie) + (cl.auto ? " (auto)" : "")
+                                + (cl.reparti > 0 ? " · réparti " + SmsParser.fmt(cl.reparti) + (cl.reste() > 0 ? ", reste " + SmsParser.fmt(cl.reste()) : "") : "");
+                        motif = cl.motif;
+                    }
+                    if (l.variationEspeces != 0)
+                        controle = ("OK".equals(controle) ? "" : controle + " ; ") + "espèces " + (l.variationEspeces > 0 ? "+" : "−") + SmsParser.fmt(Math.abs(l.variationEspeces));
+                }
+            }
+            List<Object> c = new ArrayList<>();
+            c.add(new Date(l.date));
+            c.add(Soldes.nom(l.compte));
+            c.add(type);
+            c.add(sensL);
+            c.add(fcfa(montant));
+            c.add(fcfa(frais));
+            for (String k : rv.comptes) c.add(fcfa(l.solde(k)));
+            c.add(fcfa(l.total));
+            c.add(contrepartie);
+            c.add(numero);
+            c.add(id);
+            c.add(categorie);
+            c.add(motif);
+            c.add(controle);
+            j.row(c.toArray());
+        }
+        j.row(ligneSoldes(rv.to != Long.MAX_VALUE ? new Date(rv.to) : null, "**Clôture", "Solde à la fin de la période", rv, rv.cloture, rv.totalCloture));
+    }
+
+    private static Object[] ligneSoldes(Date d, String titre, String type, Soldes.Releve rv, Map<String, Long> soldes, Long total) {
+        List<Object> c = new ArrayList<>();
+        c.add(d);
+        c.add(titre);
+        c.add(type);
+        c.add(null);
+        c.add(null);
+        c.add(null);
+        for (String k : rv.comptes) c.add(fcfa(soldes.get(k)));
+        c.add(fcfa(total));
+        return c.toArray();
     }
 
     /**

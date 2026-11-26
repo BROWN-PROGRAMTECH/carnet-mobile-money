@@ -2,6 +2,102 @@
 
 Application Android qui lit directement les SMS Orange Money et MTN MoMo du téléphone, sans export.
 
+## Version 0.17 : faux paiements (niveau 2), épargne et tontines, float agent
+
+**Faux paiements, niveau 2** (gratuit pour tous, sans réseau) :
+- **Contrôle** : à la réception d'un paiement Orange Money ou MoMo, l'application vérifie que le nouveau solde annoncé est égal au solde précédent + le montant reçu. Elle vérifie aussi que l'ID de transaction n'a pas déjà été reçu.
+- **En cas d'écart** : une notification « ⚠ Paiement non confirmé : ne livrez pas » s'affiche, avec le calcul (« 15 298 + 25 000 = 40 298, le SMS annonce 52 000 ») et le code à composer (#150# ou *126#).
+- **Dans le journal**, l'opération porte deux boutons :
+  - « Vérifié, c'est bon » ;
+  - « C'est un faux : l'écarter » : le SMS ne compte plus nulle part et n'est jamais sauvegardé.
+- **Recalage** : le dernier solde connu est recalé à chaque ouverture de l'application sur le relevé complet, en ignorant les paiements non confirmés.
+- **Essai sur vos vrais SMS** : 25 paiements reçus, une seule alerte. Elle correspondait bien à un SMS de débit de 100 FCFA manquant.
+
+**Épargne & tontines** (gratuit, onglet Finances) :
+- **Objectif d'épargne** :
+  - montant à atteindre, date facultative ;
+  - versements et retraits ;
+  - % atteint et somme à mettre de côté par mois ou par semaine pour finir à temps.
+- **Tontine** :
+  - cotisation, séances chaque semaine, toutes les 2 semaines ou chaque mois ;
+  - membres dans l'ordre du tour (« Moi » pour vous) ;
+  - pour chaque séance : à qui le tour, « J'ai cotisé », « J'ai reçu » (votre tour), et les cases « Qui a cotisé » pour le trésorier ;
+  - cotisé, reçu et reste à recevoir ; cotisations en retard.
+- **Lien avec les SMS** : un versement peut être relié à une opération des 14 derniers jours. Elle est alors classée dans la nouvelle catégorie « Épargne / tontine » (hors résultat).
+- **Rappels** : une notification par jour au plus, la veille et le jour d'une cotisation ou de votre tour.
+- **Sauvegarde** : tout est sauvegardé en ligne et commun à tous les téléphones du compte.
+
+**Float agent** (mode agent, onglet Caisse) :
+- **Carte « Float agent »** :
+  - float OM et MoMo, consommé par les dépôts clients ;
+  - espèces, consommées par les retraits clients ;
+  - nombre de jours que chacun peut tenir au rythme des 7 derniers jours.
+- **Seuil d'alerte** : réglable, sinon automatique (une journée moyenne).
+- **Notification** : une par jour au plus quand un compte agent passe sous son seuil.
+
+> Serveur : `supabase/epargne.sql` (tables `projet_epargne` et `versement_epargne`).
+
+## Version 0.16 : application « Analyse »
+
+Nouvelle application **Analyse** : 300 FCFA par mois, 14 jours d'essai. Elle est incluse dans le Pack Commerçant et dans le Pack Entreprise. On l'ouvre depuis Finances → « Voir l'analyse ». Tout est calculé sur le téléphone, à partir des opérations classées.
+
+- **À surveiller** :
+  - comptes bientôt vides au rythme actuel ;
+  - trésorerie prévue négative ;
+  - dépenses à plus de 20 % au-dessus de la moyenne, ou ventes à plus de 20 % en dessous ;
+  - budget dépassé, ou qui le sera à ce rythme ;
+  - dépense inhabituelle ;
+  - clients réguliers perdus.
+- **Ce mois, à ce rythme** :
+  - ventes, dépenses et résultat prévus en fin de mois, comparés à la moyenne des 3 mois précédents ;
+  - trésorerie d'aujourd'hui et trésorerie prévue en fin de mois.
+- **Évolution sur 12 mois** : ventes, dépenses et résultat mois par mois, avec la trésorerie en fin de mois.
+- **Ventes (90 jours)** :
+  - nombre de ventes, panier moyen ;
+  - ventes par jour de la semaine et par tranche horaire ;
+  - clients : actifs, fidèles (achat dans 2 des 3 derniers mois), nouveaux (30 jours), perdus (au moins 2 achats, rien depuis 45 jours), avec la liste des clients perdus.
+- **Où part l'argent (90 jours)** :
+  - dépenses par poste, avec la moyenne par mois ;
+  - les 5 personnes que vous payez le plus ;
+  - frais opérateur en % des sorties ;
+  - **dépenses inhabituelles** : au moins 3 fois le montant habituel du poste, et au moins 5 000 FCFA.
+- **Budgets** :
+  - **proposition** : la moyenne des 3 derniers mois, arrondie aux 500 FCFA au-dessus ;
+  - **application** en un geste (« Appliquer », ou « Appliquer les N budgets proposés ») ;
+  - **suivi** : dépense du mois, % du budget, projection en fin de mois, et % atteint les 6 mois précédents.
+- **Excel** : la feuille « Analyse » reprend tout cela dans l'export.
+- **Lecture seule** (abonnement terminé) : seule l'évolution sur 12 mois reste visible.
+
+> Serveur : `supabase/analyse.sql` est déjà installé sur Supabase.
+
+## Version 0.15 : soldes sur la période choisie
+
+**Dans l'application** :
+- **Caisse** : une nouvelle carte « Soldes · <période> » donne, pour Orange Money, MTN MoMo, chaque banque et les espèces, le solde **au début** et **à la fin** de la période choisie (Aujourd'hui, 7 jours, Ce mois, Tout, ou dates choisies), avec le **total** et la hausse ou la baisse.
+- **Solde après chaque opération** : sous chaque ligne du journal, « solde OM 50 000 · total 82 000 ». Sous chaque mouvement d'espèces, le solde des espèces et le total.
+- **Finances** :
+  - la **trésorerie** suit le mois choisi : aujourd'hui pour le mois en cours, fin du mois pour un mois passé ;
+  - le **graphique** montre le total en fin de chaque jour du mois choisi, espèces comprises ;
+  - une carte « Soldes » donne le début et la fin du mois.
+
+**Dans l'export Excel** :
+- **Feuille « Journal de caisse »** :
+  - toutes les opérations de la période, **SMS et espèces**, dans l'ordre ;
+  - une colonne **Solde** par compte (OM, MoMo, chaque banque, espèces) et une colonne **Total**, mises à jour à chaque ligne ;
+  - une ligne **Ouverture** au début et une ligne **Clôture** à la fin ;
+  - les fonds de caisse et les comptages y figurent avec leur écart ;
+  - un solde corrigé par une consultation (SMS manquant) est signalé.
+- **Synthèse** : tableau « Soldes de la période » (ouverture, clôture, variation par compte et total).
+- **Espèces** : colonne « Espèces après ».
+- **Finances** : trésorerie à la fin de la période exportée.
+
+**Règle des espèces** :
+- **ouverture** : le fond de caisse du premier jour, sinon le dernier comptage avant la période ;
+- **chaque mouvement** saisi change le solde, de même que les dépôts et retraits clients en mode agent ;
+- **un fond ou un comptage** remet le solde au montant compté.
+
+> Rien à faire sur le serveur.
+
 ## Version 0.14 : forfaits modulables et promotions
 
 **Forfaits réglables par le superadmin** (tableau de bord → onglet Applications) :

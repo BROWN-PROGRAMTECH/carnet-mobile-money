@@ -27,7 +27,7 @@ import java.util.UUID;
 public final class Cloud {
     private Cloud() {}
 
-    public static final String VERSION_APP = "0.14";
+    public static final String VERSION_APP = "0.17";
     private static final String DOMAIN = "@carnet-mm.app";
     private static final int PAGE = 1000, BATCH = 500;
 
@@ -186,6 +186,7 @@ public final class Cloud {
             java.util.Set<String> mesCles = null;
 
             for (Store.Spec s : Store.SYNC) {
+              try {
                 String select = String.join(",", s.cols);
                 boolean parCaisse = PAR_CAISSE.contains(s.table);
                 String filtre = parCaisse ? "&caisse=eq." + caisse : "";
@@ -256,6 +257,10 @@ public final class Cloud {
                     prefs(c).edit().putLong("push_" + s.table, sent).putString("pushk_" + s.table, sentKey).apply();
                     if (rows.size() < BATCH) break;
                 }
+              } catch (CloudException e) {
+                // Tables ajoutées en 0.17 : si le serveur n'est pas encore à jour, le reste de la sauvegarde continue.
+                if (!TABLES_RECENTES.contains(s.table)) throw e;
+              }
             }
             registerDevice(c, tok, userId);
             try { recharges(c, tok, st, null); } catch (Exception ignored) {}
@@ -264,6 +269,7 @@ public final class Cloud {
             envoyerPlantages(c, tok, userId);
             try { envoyerExportsEnAttente(c, tok); rafraichirPortefeuille(c, tok); } catch (Exception ignored) {}
             try { rafraichirModules(c, tok); rappelModules(c); } catch (Exception ignored) {}
+            SmsReceiver.rappelEpargne(c);
             try { alertes(c, tok, st, false); } catch (Exception ignored) {}
             try { rafraichirReglesIa(c, tok); lireInconnusIa(c, tok, st); } catch (Exception ignored) {}
             envoyerIncidents(c, tok, userId);
@@ -283,6 +289,7 @@ public final class Cloud {
 // ---------- Caisses (un compte, plusieurs téléphones) ----------
 
     /** Tables dont les lignes appartiennent à une caisse ; les règles par contact restent communes au compte. */
+    private static final java.util.Set<String> TABLES_RECENTES = new java.util.HashSet<>(java.util.Arrays.asList("projet_epargne", "versement_epargne"));
     private static final java.util.Set<String> PAR_CAISSE = new java.util.HashSet<>(java.util.Arrays.asList("sms", "classement", "saisie", "jour", "budget", "avoir", "suivi"));
     /** Tables dont la clé locale (« AAAA-MM-JJ », poste, identifiant) devient « caisse|clé » sur le serveur. */
     private static final java.util.Set<String> CLE_PAR_CAISSE = new java.util.HashSet<>(java.util.Arrays.asList("jour", "budget", "avoir"));

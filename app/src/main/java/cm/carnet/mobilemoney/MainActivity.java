@@ -116,6 +116,8 @@ public class MainActivity extends Activity {
     private List<Caisse.Saisie> saisies = new ArrayList<>();
     private List<Caisse.Jour> jours = new ArrayList<>();
     private Caisse.Bilan bilan;
+    /** Soldes de la période affichée (version 0.15). */
+    private Soldes.Releve releve;
     /** Suivi de l'argent (cle opération → cle source) et dettes / créances. */
     private Map<String, String> liens = new HashMap<>();
     private List<Dettes.Engagement> engagements = new ArrayList<>();
@@ -127,7 +129,7 @@ public class MainActivity extends Activity {
     /** Agent IA (0.13) : propositions de l'IA en ligne, conversation avec l'assistant. */
     private final Map<String, Classeur.Proposition> propositionsIa = new HashMap<>();
     private Map<String, Classeur.Proposition> propsCourantes = new HashMap<>();
-    private boolean assistantOuvert, assistantAttente;
+    private boolean assistantOuvert, assistantAttente, analyseOuvert;
     private final List<String[]> conversation = new ArrayList<>();
     private org.json.JSONArray historiqueIa = new org.json.JSONArray();
     private EditText questionChamp;
@@ -270,6 +272,15 @@ public class MainActivity extends Activity {
         return PERIODS[period] + " (depuis le " + d.format(new Date(r[0])) + ")";
     }
 
+    /** Nom court de la période pour les titres : « Aujourd'hui », « Ce mois », « 03/11 – 20/11 »… */
+    private String periodeTexte() {
+        if (period == CUSTOM) {
+            SimpleDateFormat f = new SimpleDateFormat("dd/MM", Locale.FRANCE);
+            return f.format(new Date(customFrom)) + " – " + f.format(new Date(customTo));
+        }
+        return PERIODS[period];
+    }
+
     private void setPeriod(int p) {
         period = p;
         Store.savePref(this, "periode", String.valueOf(p));
@@ -351,7 +362,40 @@ public class MainActivity extends Activity {
         if (!r.ownerOm.isEmpty()) Store.savePref(this, "ownerOmAuto", r.ownerOm);
         result = r;
         analysedKey = key;
+        recalerChaine(r);
         return r;
+    }
+
+    /**
+     * Version 0.17 : recale le dernier solde connu de chaque compte (contrôle des paiements à la réception) sur le relevé
+     * complet, et calcule le seuil automatique du float agent (une journée moyenne de dépôts).
+     */
+    private void recalerChaine(Analyzer.Result r) {
+        long now = System.currentTimeMillis();
+        java.util.Set<String> douteux = douteux();
+        for (String op : new String[] {Caisse.OM, Caisse.MOMO}) {
+            // Dernier solde d'un SMS non douteux (un faux SMS non écarté ne doit pas fausser le contrôle suivant).
+            Txn dernier = null;
+            for (Txn t : r.tx) {
+                if (!op.equals(t.op) || t.apres == null || douteux.contains(Caisse.cle(t))) continue;
+                if (dernier == null || t.date > dernier.date) dernier = t;
+            }
+            if (dernier != null) Store.savePref(this, "chaine_" + op, String.valueOf(dernier.apres));
+            if (agent(op)) Store.savePref(this, "float_auto_" + op, String.valueOf(Flotte.electronique(r, op, 0, now).parJour));
+        }
+    }
+
+    /** Clés des paiements reçus non confirmés (solde qui ne suit pas, ID déjà vu). */
+    private java.util.Set<String> douteux() {
+        java.util.Set<String> s = new java.util.HashSet<>(java.util.Arrays.asList(Store.pref(this, "douteux", "").split("\n")));
+        s.remove("");
+        return s;
+    }
+
+    private void retirerDouteux(String cle) {
+        java.util.Set<String> s = douteux();
+        s.remove(cle);
+        Store.savePref(this, "douteux", String.join("\n", s));
     }
 
     private void loadCaisse(Store store) {
@@ -443,6 +487,10 @@ public class MainActivity extends Activity {
         }
         if (newest > since) Store.savePref(this, "inboxDernier", String.valueOf(newest));
         return added;
+    }
+
+    private Soldes.Releve computeSoldes(long from, long to) {
+        return Soldes.calculer(result, saisies, jours, from, to, agent(Caisse.OM), agent(Caisse.MOMO));
     }
 
     private Caisse.Bilan computeBilan(long from, long to) {
@@ -563,7 +611,7 @@ public class MainActivity extends Activity {
             case Caisse.APPORT: case Caisse.RETRAIT_PERSO: return WARN;
             case Caisse.PRET_RECU: case Caisse.REMB_PRET: case Caisse.PRET_ACCORDE: case Caisse.REMB_RECU: return OM;
             case Caisse.REPARTI: return PURPLE;
-            case Caisse.DON: return PURPLE;
+            case Caisse.DON: case Caisse.EPARGNE: return PURPLE;
             case Caisse.TRANSFERT: case Caisse.AGENT: return CASH;
             default: return Caisse.estCharge(c) ? INK : MUTED;
         }
@@ -652,7 +700,7 @@ public class MainActivity extends Activity {
             mes.add("Mes catégories");
             for (String c : dispo) if (Caisse.estCree(c) && !Caisse.estCharge(c)) mes.add(c);
             sections.add(mes.toArray(new String[0]));
-            sections.add(new String[] {"Entrée ou sortie", Caisse.DON, Caisse.TRANSFERT, Caisse.AUTRE});
+            sections.add(new String[] {"Entrée ou sortie", Caisse.EPARGNE, Caisse.DON, Caisse.TRANSFERT, Caisse.AUTRE});
             for (String[] sec : sections) {
                 List<String> items = new ArrayList<>();
                 for (int i = 1; i < sec.length; i++) if (dispo.contains(sec[i])) items.add(sec[i]);
@@ -1136,6 +1184,7 @@ public class MainActivity extends Activity {
         page.removeAllViews();
         long[] range = range();
         bilan = result == null ? null : computeBilan(range[0], range[1]);
+        releve = result == null ? null : computeSoldes(range[0], range[1]);
         int ac = bilan == null ? 0 : bilan.aClasser.size();
         classerBadge.setText(ac > 99 ? "99+" : String.valueOf(ac));
         classerBadge.setVisibility(ac > 0 ? View.VISIBLE : View.GONE);
@@ -1147,6 +1196,8 @@ public class MainActivity extends Activity {
             case PAGE_COMPTE: if (applicationsOuvert) applicationsPage(); else comptePage(); break;
             case PAGE_FINANCES:
                 if (assistantOuvert) assistantPage();
+                else if (analyseOuvert) analysePage();
+                else if (projetOuvert != null) projetPage();
                 else if (suiviOuvert != null) suiviPage();
                 else if (personneOuverte != null) personnePage();
                 else if (categorieOuverte != null) categoriePage();
@@ -1247,6 +1298,8 @@ public class MainActivity extends Activity {
             }
         }
         page.addView(especesCard(bilan.especes), fill());
+        if ((agent(Caisse.OM) || agent(Caisse.MOMO)) && result != null) page.addView(floatCard(), fill());
+        if (releve != null && !releve.comptes.isEmpty()) page.addView(soldesPeriodeCard(releve, periodeTexte()), fill());
 
         List<Txn> unknown = new ArrayList<>();
         for (Txn u : result.unknown) if (u.smsDate >= range[0] && u.smsDate <= range[1]) unknown.add(u);
@@ -1373,6 +1426,44 @@ public class MainActivity extends Activity {
         TextView val = text(v, 12, INK, false);
         val.setTypeface(Typeface.MONOSPACE);
         row.addView(val);
+        return row;
+    }
+
+    /** Soldes de la période : chaque compte au début et à la fin, et le total (version 0.15). */
+    private View soldesPeriodeCard(Soldes.Releve rv, String titre) {
+        LinearLayout card = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("Soldes · " + titre, 15, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        card.addView(head, fill());
+        LinearLayout th = new LinearLayout(this);
+        th.addView(label(""), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f));
+        TextView d = label("Début");
+        d.setGravity(Gravity.END);
+        th.addView(d, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView f = label("Fin");
+        f.setGravity(Gravity.END);
+        th.addView(f, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        card.addView(th, fill());
+        for (String k : rv.comptes) card.addView(ligneSolde(Soldes.court(k), rv.ouverture.get(k), rv.cloture.get(k), false), fill());
+        card.addView(divider());
+        card.addView(ligneSolde("Total", rv.totalOuverture, rv.totalCloture, true), fill());
+        Long v = rv.variationTotale();
+        if (v != null) card.addView(text((v >= 0 ? "Hausse de " : "Baisse de ") + SmsParser.fmt(Math.abs(v)) + " FCFA sur la période", 12, v >= 0 ? GOOD : BAD, true));
+        card.addView(text("Le solde de chaque compte et le total après chaque opération sont dans le journal ci-dessous et dans l'export Excel.", 11, MUTED, false));
+        return card;
+    }
+
+    private View ligneSolde(String nom, Long debut, Long fin, boolean gras) {
+        LinearLayout row = new LinearLayout(this);
+        row.setPadding(0, dp(3), 0, dp(3));
+        row.addView(text(nom, 14, INK, gras), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f));
+        for (Long v : new Long[] {debut, fin}) {
+            TextView t = text(v == null ? "—" : SmsParser.fmt(v), 14, v != null && v < 0 ? BAD : INK, gras);
+            t.setTypeface(Typeface.MONOSPACE, gras ? Typeface.BOLD : Typeface.NORMAL);
+            t.setGravity(Gravity.END);
+            row.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        }
         return row;
     }
 
@@ -1855,6 +1946,8 @@ public class MainActivity extends Activity {
         if (result == null) { page.addView(empty("Ouverture de vos finances…")); return; }
 
         if (Cloud.configured() && Cloud.loggedIn(this) && visible(Modules.ASSISTANT)) page.addView(assistantCard(), fill());
+        if (Cloud.configured() && Cloud.loggedIn(this)) page.addView(analyseCard(), fill());
+        page.addView(epargneCard(), fill());
         Caisse.Bilan b = computeBilan(debut, fin);
         if (acces(Modules.FINANCES) == Modules.Acces.ABSENT) {
             // Base gratuite : entrées et dépenses par catégorie ; le reste est proposé.
@@ -1883,10 +1976,13 @@ public class MainActivity extends Activity {
             page.addView(a, fill());
         }
 
-        // Trésorerie (aujourd'hui).
-        long debutJour = Caisse.debutJour(Caisse.jourDe(now));
-        Finances.Tresorerie tr = Finances.tresorerie(result, computeBilan(debutJour, now).especes, Store.get(this).avoirs());
-        page.addView(tresorerieCard(tr, now), fill());
+        // Trésorerie à la fin du mois choisi (aujourd'hui pour le mois en cours) et soldes du mois.
+        Soldes.Releve rvMois = computeSoldes(debut, fin);
+        Finances.Tresorerie tr = Finances.tresorerie(result, rvMois.comptes.contains(Soldes.ESPECES) ? rvMois.cloture.get(Soldes.ESPECES) : null,
+                Store.get(this).avoirs(), fin);
+        page.addView(tresorerieCard(tr, rvMois, enCours ? "AUJOURD'HUI" : "FIN " + nomMois.toUpperCase(Locale.FRANCE),
+                enCours ? "ce mois" : nomMois.toLowerCase(Locale.FRANCE)), fill());
+        if (!rvMois.comptes.isEmpty()) page.addView(soldesPeriodeCard(rvMois, enCours ? "ce mois" : nomMois), fill());
 
         // Le mois.
         LinearLayout mc = card();
@@ -1979,11 +2075,11 @@ public class MainActivity extends Activity {
         page.addView(text("Les chiffres viennent des opérations classées de cette caisse. Classez les opérations « À classer » pour des chiffres complets.", 12, MUTED, false));
     }
 
-    private View tresorerieCard(Finances.Tresorerie tr, long now) {
+    private View tresorerieCard(Finances.Tresorerie tr, Soldes.Releve rv, String moment, String periode) {
         LinearLayout c = column(6);
         c.setBackground(box(ACCENT, 0, 18));
         c.setPadding(dp(18), dp(16), dp(18), dp(16));
-        TextView lab = text("TRÉSORERIE · AUJOURD'HUI", 11, ON_ACCENT_SOFT, true);
+        TextView lab = text("TRÉSORERIE · " + moment, 11, ON_ACCENT_SOFT, true);
         lab.setLetterSpacing(0.05f);
         c.addView(lab);
         TextView tot = text(SmsParser.fmt(tr.total) + " FCFA", 30, Color.WHITE, true);
@@ -2006,12 +2102,12 @@ public class MainActivity extends Activity {
             if (p.manuel) row.setOnClickListener(x -> ouvrirAvoir(p));
             c.addView(row, fill());
         }
-        // Évolution des soldes lus par SMS sur 30 jours (barres).
-        Long[] ev = Finances.evolution(result, 30, now);
+        // Évolution du total des comptes (SMS et espèces), jour par jour sur la période.
+        Long[] ev = rv.parJour(31);
         long mn = Long.MAX_VALUE, mx = Long.MIN_VALUE;
         for (Long v : ev) if (v != null) { mn = Math.min(mn, v); mx = Math.max(mx, v); }
         if (mx != Long.MIN_VALUE && mx > 0) {
-            c.addView(text("Soldes OM, MoMo et banques · 30 derniers jours", 11, ON_ACCENT_SOFT, false));
+            c.addView(text("Total OM, MoMo, banques" + (rv.comptes.contains(Soldes.ESPECES) ? " et espèces" : "") + " · fin de chaque jour, " + periode, 11, ON_ACCENT_SOFT, false));
             LinearLayout bars = new LinearLayout(this);
             bars.setGravity(Gravity.BOTTOM);
             int h = dp(56);
@@ -2625,8 +2721,12 @@ public class MainActivity extends Activity {
 
         String who = (t.nom != null ? t.nom : "") + (t.numero != null ? (t.nom != null ? " · " : "") + t.numero : "");
         if (!who.isEmpty()) row.addView(text(who, 13, MUTED, false));
+        Soldes.Ligne sl = releve != null ? releve.parSms.get(t) : null;
+        String apres = sl != null ? Soldes.texteApres(releve, sl) : "solde " + SmsParser.fmt(t.solde != null ? t.solde : t.apres);
         row.addView(text(when(t.date) + (t.txnId != null ? " · ID " + t.txnId : "") + (t.frais > 0 ? " · frais " + SmsParser.fmt(t.frais) : "")
-                + " · solde " + SmsParser.fmt(t.solde != null ? t.solde : t.apres), 12, MUTED, false));
+                + (apres.isEmpty() ? "" : " · " + apres), 12, MUTED, false));
+
+        if (douteux().contains(Caisse.cle(t))) row.addView(alerteDouteux(t), fill());
 
         LinearLayout cat = new LinearLayout(this);
         cat.setGravity(Gravity.CENTER_VERTICAL);
@@ -2679,7 +2779,9 @@ public class MainActivity extends Activity {
         amt.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         top.addView(amt);
         row.addView(top, fill());
-        row.addView(text(when(s.date), 12, MUTED, false));
+        Soldes.Ligne sl = releve != null && !s.annule ? releve.parSaisie.get(s) : null;
+        String apres = sl != null ? Soldes.texteApres(releve, sl) : "";
+        row.addView(text(when(s.date) + (apres.isEmpty() ? "" : " · " + apres), 12, MUTED, false));
         LinearLayout act = new LinearLayout(this);
         act.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout chipBox = new LinearLayout(this);
@@ -3229,6 +3331,7 @@ public class MainActivity extends Activity {
             case Modules.SUIVI: return "Suivi de l'argent";
             case Modules.DETTES: return "Dettes & créances";
             case Modules.MULTI: return "Multi-téléphones";
+            case Modules.ANALYSE: return "Analyse";
             default: return code;
         }
     }
@@ -3488,6 +3591,40 @@ public class MainActivity extends Activity {
     }
 
     /** Bandeau rouge après un faux SMS de paiement (48 heures, ou jusqu'à fermeture). */
+    /** Paiement reçu non confirmé (version 0.17) : vérifié et bon, ou faux à écarter. */
+    private View alerteDouteux(Txn t) {
+        LinearLayout b = column(4);
+        b.setBackground(box(BAD_BG, 0, 10));
+        b.setPadding(dp(10), dp(8), dp(10), dp(8));
+        String ussd = Caisse.MOMO.equals(t.op) ? "*126#" : "#150#";
+        b.addView(text("⚠  Paiement non confirmé : le solde annoncé ne suit pas vos SMS précédents. Vérifiez au " + ussd + ".", 12, BAD, true));
+        LinearLayout act = new LinearLayout(this);
+        act.addView(small("Vérifié, c'est bon", GOOD, v -> {
+            retirerDouteux(Caisse.cle(t));
+            Store.savePref(this, "faux_sms", "");
+            notice("Paiement confirmé.", 1);
+            render();
+        }), weight(false));
+        act.addView(small("C'est un faux : l'écarter", BAD, v -> new AlertDialog.Builder(this)
+                .setTitle("Écarter ce SMS ?")
+                .setMessage("Il ne comptera plus dans vos soldes, votre caisse ni vos exports. Faites-le seulement si votre solde (" + ussd
+                        + ") montre que l'argent n'est pas arrivé.")
+                .setPositiveButton("Écarter", (x, y) -> io.execute(() -> {
+                    Store.get(this).ecarterFaux(t.sender, t.raw);
+                    runOnUiThread(() -> {
+                        retirerDouteux(Caisse.cle(t));
+                        Store.savePref(this, "faux_sms", "");
+                        analysedKey = "";
+                        notice("Faux SMS écarté.", 1);
+                        reload(false);
+                    });
+                }))
+                .setNegativeButton("Annuler", null)
+                .show()), weight(false));
+        b.addView(act, fill());
+        return b;
+    }
+
     private View bandeauFauxSms() {
         String v = Store.pref(this, "faux_sms", "");
         int i = v.indexOf('|');
@@ -3498,13 +3635,734 @@ public class MainActivity extends Activity {
         LinearLayout b = column(4);
         b.setBackground(box(BAD_BG, 0, 12));
         b.setPadding(dp(12), dp(10), dp(12), dp(10));
-        b.addView(text("⚠  Faux SMS de paiement probable · " + when(quand), 14, BAD, true));
+        b.addView(text((v.substring(i + 1).startsWith("Paiement") ? "⚠  Paiement non confirmé · " : "⚠  Faux SMS de paiement probable · ") + when(quand), 14, BAD, true));
         b.addView(text(v.substring(i + 1), 13, INK, false));
         b.addView(small("J'ai compris", BAD, x -> { Store.savePref(this, "faux_sms", ""); render(); }));
         return b;
     }
 
     // ----- Assistant qui répond -----
+
+    // ----- Float agent (0.17) -----
+
+    private View floatCard() {
+        long now = System.currentTimeMillis();
+        List<String> ops = new ArrayList<>();
+        if (agent(Caisse.OM)) ops.add(Caisse.OM);
+        if (agent(Caisse.MOMO)) ops.add(Caisse.MOMO);
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("Float agent", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(small("Seuils", INK, v -> ouvrirSeuilsFloat(ops)));
+        c.addView(head, fill());
+        List<Flotte.Etat> etats = new ArrayList<>();
+        for (String op : ops) etats.add(Flotte.electronique(result, op, Store.prefLong(this, "seuil_float_" + op, 0) * 100, now));
+        Caisse.Especes e = computeBilan(Caisse.debutJour(Caisse.jourDe(now)), now).especes;
+        Long esp = e.compte != null ? e.compte : (e.ouverture != null || e.entrees > 0 || e.sorties > 0 || e.depotsClients > 0 ? (Long) e.theo : null);
+        etats.add(Flotte.especes(result, ops, esp, Store.prefLong(this, "seuil_float_" + Caisse.ESPECES, 0) * 100, now));
+        for (Flotte.Etat f : etats) {
+            LinearLayout row = column(2);
+            row.setPadding(0, dp(5), 0, dp(5));
+            LinearLayout h = new LinearLayout(this);
+            h.addView(text(f.nom(), 14, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            TextView v = text(f.solde == null ? "—" : SmsParser.fmt(f.solde) + " FCFA", 14, f.bas ? BAD : INK, true);
+            v.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+            h.addView(v);
+            row.addView(h, fill());
+            row.addView(text(Flotte.texte(f), 12, MUTED, false));
+            if (f.seuil > 0) row.addView(text("Seuil d'alerte : " + SmsParser.fmt(f.seuil) + (f.manuel ? "" : " (une journée moyenne)"), 11, MUTED, false));
+            String al = Flotte.alerte(f);
+            if (al != null) row.addView(text("⚠  " + al, 13, BAD, true));
+            c.addView(row, fill());
+        }
+        c.addView(text("Les dépôts clients consomment votre float électronique ; les retraits clients, vos espèces. "
+                + "Une notification vous prévient quand un compte agent passe sous son seuil.", 11, MUTED, false));
+        return c;
+    }
+
+    private void ouvrirSeuilsFloat(List<String> ops) {
+        LinearLayout form = column(8);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        List<String> comptes = new ArrayList<>(ops);
+        comptes.add(Caisse.ESPECES);
+        Map<String, EditText> champs = new HashMap<>();
+        for (String k : comptes) {
+            form.addView(label(Caisse.ESPECES.equals(k) ? "Espèces (retraits clients)" : Txn.opName(k) + " (dépôts clients)"));
+            EditText f = amountField("Seuil en FCFA (vide = automatique)");
+            f.setInputType(InputType.TYPE_CLASS_NUMBER);
+            long v = Store.prefLong(this, "seuil_float_" + k, 0);
+            if (v > 0) f.setText(String.valueOf(v));
+            form.addView(f, fill());
+            champs.put(k, f);
+        }
+        form.addView(text("Automatique : une journée moyenne de dépôts (ou de retraits) des 7 derniers jours.", 12, MUTED, false));
+        new AlertDialog.Builder(this)
+                .setTitle("Seuils d'alerte du float")
+                .setView(form)
+                .setPositiveButton("Enregistrer", (x, y) -> {
+                    for (Map.Entry<String, EditText> en : champs.entrySet()) {
+                        String d = en.getValue().getText().toString().replaceAll("\\D", "");
+                        Store.savePref(this, "seuil_float_" + en.getKey(), d.isEmpty() || d.length() > 9 ? "0" : d);
+                    }
+                    notice("Seuils enregistrés.", 1);
+                    render();
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    // ----- Épargne et tontines (0.17, gratuites) -----
+
+    private boolean epargneOuvert;
+    private String projetOuvert;
+
+    private List<Epargne.Projet> projets() {
+        List<Epargne.Projet> out = new ArrayList<>();
+        for (Epargne.Projet p : Store.get(this).projetsEpargne()) if (!p.annule) out.add(p);
+        return out;
+    }
+
+    private Epargne.Projet projet(String id) {
+        for (Epargne.Projet p : Store.get(this).projetsEpargne()) if (p.id.equals(id)) return p;
+        return null;
+    }
+
+    private View epargneCard() {
+        long now = System.currentTimeMillis();
+        List<Epargne.Projet> ps = projets();
+        List<Epargne.Versement> vs = Store.get(this).versementsEpargne();
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("🐷 Épargne & tontines", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        head.addView(chip("Gratuit", GOOD, GOOD_BG));
+        c.addView(head, fill());
+        if (ps.isEmpty()) {
+            c.addView(text("Suivez un objectif d'épargne (rentrée, loyer, marchandise…) ou vos tontines : cotisations, tour de chacun, ce que vous avez reçu.", 13, MUTED, false));
+        } else {
+            for (String r : Epargne.rappels(ps, vs, now)) c.addView(text("🔔  " + r, 13, WARN, true));
+            for (Epargne.Projet p : ps) c.addView(resumeProjet(p, vs, now), fill());
+        }
+        LinearLayout act = new LinearLayout(this);
+        act.addView(small("+ Objectif d'épargne", ACCENT, v -> ouvrirProjet(null, Epargne.OBJECTIF)), weight(false));
+        act.addView(small("+ Tontine", ACCENT, v -> ouvrirProjet(null, Epargne.TONTINE)), weight(false));
+        c.addView(act, fill());
+        return c;
+    }
+
+    private View resumeProjet(Epargne.Projet p, List<Epargne.Versement> vs, long now) {
+        LinearLayout r = column(2);
+        r.setPadding(0, dp(6), 0, dp(6));
+        LinearLayout h = new LinearLayout(this);
+        h.addView(text((p.tontine() ? "Tontine · " : "") + p.nom, 14, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        h.addView(text("›", 16, MUTED, true));
+        r.addView(h, fill());
+        if (p.tontine()) {
+            Epargne.EtatTontine e = Epargne.tontine(p, vs, now);
+            String prochaine = e.prochaine == null ? "" : "Prochaine séance le " + Modules.date(e.prochaine.date) + " · tour de "
+                    + (e.prochaine.monTour(p) ? "vous" : e.prochaine.nomBeneficiaire);
+            r.addView(text(prochaine, 12, MUTED, false));
+            r.addView(text("Cotisé " + SmsParser.fmt(e.cotise) + " · reçu " + SmsParser.fmt(e.recu)
+                    + (e.monTour != null && (e.prochaine == null || e.monTour.n != e.prochaine.n) ? " · votre tour le " + Modules.date(e.monTour.date) : ""), 12, MUTED, false));
+        } else {
+            Epargne.EtatObjectif e = Epargne.objectif(p, vs, now);
+            r.addView(barre(SmsParser.fmt(e.epargne) + " / " + SmsParser.fmt(p.montant), e.epargne, p.montant, e.atteint ? GOOD : ACCENT, e.pourcent + " %"), fill());
+            if (e.atteint) r.addView(text("Objectif atteint 🎉", 12, GOOD, true));
+            else if (e.parMois != null) r.addView(text("Mettez " + SmsParser.fmt(e.parMois) + " par mois (" + SmsParser.fmt(e.parSemaine) + " par semaine) pour le " + Modules.date(p.fin), 12, MUTED, false));
+        }
+        r.setOnClickListener(v -> { fermerDetail(); projetOuvert = p.id; pageIdx = PAGE_FINANCES; render(); });
+        return r;
+    }
+
+    /** Création (p == null) ou modification d'un objectif ou d'une tontine. */
+    private void ouvrirProjet(Epargne.Projet p, String type) {
+        boolean tontine = Epargne.TONTINE.equals(p != null ? p.type : type);
+        LinearLayout form = column(8);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        EditText nom = new EditText(this);
+        nom.setSingleLine(true);
+        nom.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        nom.setHint(tontine ? "Nom (ex. Njangi du marché)" : "Nom (ex. Rentrée scolaire)");
+        EditText montant = amountField(tontine ? "Cotisation par séance (FCFA)" : "Montant à atteindre (FCFA)");
+        montant.setInputType(InputType.TYPE_CLASS_NUMBER);
+        EditText date = new EditText(this);
+        date.setSingleLine(true);
+        date.setHint(tontine ? "Date de la 1re séance (JJ/MM/AAAA)" : "À atteindre le (JJ/MM/AAAA, facultatif)");
+        date.setInputType(InputType.TYPE_CLASS_DATETIME);
+        final String[] freq = {p != null ? p.frequence : Epargne.MOIS};
+        EditText membres = new EditText(this);
+        membres.setHint("Membres dans l'ordre du tour, un par ligne (écrivez « Moi » pour vous)");
+        membres.setMinLines(4);
+        membres.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        java.text.SimpleDateFormat df = new java.text.SimpleDateFormat("dd/MM/yyyy", Locale.FRANCE);
+        if (p != null) {
+            nom.setText(p.nom);
+            montant.setText(String.valueOf(p.montant / 100));
+            if (tontine) date.setText(df.format(new Date(p.debut)));
+            else if (p.fin != null) date.setText(df.format(new Date(p.fin)));
+            List<String> ms = new ArrayList<>(p.membres);
+            if (p.moi >= 0 && p.moi < ms.size()) ms.set(p.moi, "Moi");
+            membres.setText(String.join("\n", ms));
+        } else if (tontine) {
+            date.setText(df.format(new Date()));
+            membres.setText("Moi\n");
+        }
+        form.addView(nom, fill());
+        form.addView(montant, fill());
+        form.addView(date, fill());
+        if (tontine) {
+            form.addView(label("Séances"));
+            LinearLayout fr = new LinearLayout(this);
+            List<Button> bts = new ArrayList<>();
+            String[][] choix = {{Epargne.SEMAINE, "Chaque semaine"}, {Epargne.QUINZAINE, "2 semaines"}, {Epargne.MOIS, "Chaque mois"}};
+            for (String[] ch : choix) {
+                Button b = small(ch[1], ch[0].equals(freq[0]) ? ACCENT : INK, null);
+                b.setOnClickListener(v -> {
+                    freq[0] = ch[0];
+                    for (int i = 0; i < bts.size(); i++) bts.get(i).setTextColor(choix[i][0].equals(freq[0]) ? ACCENT : INK);
+                });
+                bts.add(b);
+                fr.addView(b, weight(false));
+            }
+            form.addView(fr, fill());
+            form.addView(membres, fill());
+            form.addView(text("À chaque séance, c'est le tour du membre suivant de la liste. Laissez « Moi » de côté si vous tenez seulement les comptes.", 12, MUTED, false));
+        }
+        ScrollView sv = new ScrollView(this);
+        sv.addView(form);
+        AlertDialog.Builder d = new AlertDialog.Builder(this)
+                .setTitle(p != null ? "Modifier « " + p.nom + " »" : tontine ? "Nouvelle tontine" : "Nouvel objectif d'épargne")
+                .setView(sv)
+                .setPositiveButton("Enregistrer", (x, y) -> {
+                    String n = nom.getText().toString().trim();
+                    String dg = montant.getText().toString().replaceAll("\\D", "");
+                    if (n.isEmpty() || dg.isEmpty() || dg.length() > 10) { notice("Indiquez un nom et un montant.", 2); return; }
+                    Long quand = null;
+                    String ds = date.getText().toString().trim();
+                    if (!ds.isEmpty()) {
+                        try { df.setLenient(false); quand = df.parse(ds).getTime(); } catch (Exception ex) { notice("Date à écrire JJ/MM/AAAA (ex. 15/01/2027).", 2); return; }
+                    }
+                    Epargne.Projet q = p != null ? p : new Epargne.Projet();
+                    if (q.id == null) q.id = java.util.UUID.randomUUID().toString();
+                    q.type = tontine ? Epargne.TONTINE : Epargne.OBJECTIF;
+                    q.nom = n;
+                    q.montant = Long.parseLong(dg) * 100;
+                    if (tontine) {
+                        q.debut = quand != null ? quand : Caisse.debutJour(Caisse.jourDe(System.currentTimeMillis()));
+                        q.frequence = freq[0];
+                        q.membres.clear();
+                        q.moi = -1;
+                        for (String m : membres.getText().toString().split("\n")) {
+                            String mm = m.trim();
+                            if (mm.isEmpty()) continue;
+                            if (q.moi < 0 && (mm.equalsIgnoreCase("moi") || mm.equalsIgnoreCase("moi-même"))) { q.moi = q.membres.size(); mm = "Moi"; }
+                            q.membres.add(mm);
+                        }
+                        if (q.membres.size() < 2) { notice("Une tontine a au moins deux membres.", 2); return; }
+                    } else {
+                        if (q.debut == 0) q.debut = System.currentTimeMillis();
+                        q.fin = quand == null ? null : quand + 86400000L - 1;
+                    }
+                    io.execute(() -> {
+                        Store.get(this).setProjetEpargne(q);
+                        SyncJob.soon(this);
+                        runOnUiThread(() -> { notice("« " + n + " » enregistré.", 1); projetOuvert = q.id; pageIdx = PAGE_FINANCES; render(); });
+                    });
+                })
+                .setNegativeButton("Annuler", null);
+        if (p != null) {
+            d.setNeutralButton("Supprimer", (x, y) -> new AlertDialog.Builder(this)
+                    .setTitle("Supprimer « " + p.nom + " » ?")
+                    .setMessage("Ses versements ne seront plus suivis. Les opérations classées en Épargne gardent leur catégorie.")
+                    .setPositiveButton("Supprimer", (x2, y2) -> io.execute(() -> {
+                        p.annule = true;
+                        Store.get(this).setProjetEpargne(p);
+                        SyncJob.soon(this);
+                        runOnUiThread(() -> { projetOuvert = null; notice("« " + p.nom + " » supprimé.", 0); render(); });
+                    }))
+                    .setNegativeButton("Annuler", null)
+                    .show());
+        }
+        d.show();
+    }
+
+    /**
+     * Versement (sens +1) ou retrait / tour reçu (sens -1). membre et seance : tontine (membre = moi pour ses propres
+     * cotisations). Propose les opérations récentes de même sens pour les relier.
+     */
+    private void ouvrirVersement(Epargne.Projet p, int sens, int membre, int seance, long montantDefaut, String titre) {
+        LinearLayout form = column(8);
+        form.setPadding(dp(20), dp(8), dp(20), 0);
+        EditText montant = amountField("Montant (FCFA)");
+        montant.setInputType(InputType.TYPE_CLASS_NUMBER);
+        if (montantDefaut > 0) montant.setText(String.valueOf(montantDefaut / 100));
+        EditText motif = new EditText(this);
+        motif.setSingleLine(true);
+        motif.setHint("Note (facultatif)");
+        form.addView(montant, fill());
+        form.addView(motif, fill());
+        final String[] lien = {null};
+        final long[] dateLien = {0};
+        boolean propre = !p.tontine() || membre == p.moi;
+        if (propre && result != null) {
+            // Opérations des 14 derniers jours, de même sens, pas encore reliées à une épargne.
+            java.util.Set<String> deja = new java.util.HashSet<>();
+            for (Epargne.Versement v : Store.get(this).versementsEpargne()) if (!v.annule && v.cle != null) deja.add(v.cle);
+            long now = System.currentTimeMillis();
+            List<Txn> props = new ArrayList<>();
+            for (Txn t : result.tx) {
+                if (t.kind != Txn.TX || t.isBalanceCheck() || t.date < now - 14 * 86400000L || deja.contains(Caisse.cle(t))) continue;
+                if ((sens > 0 && t.sens < 0) || (sens < 0 && t.sens > 0)) props.add(t);
+            }
+            props.sort((a, b) -> Long.compare(b.date, a.date));
+            if (!props.isEmpty()) {
+                form.addView(label(sens > 0 ? "Payé par une de ces opérations ?" : "Reçu par une de ces opérations ?"));
+                LinearLayout liste = column(2);
+                List<TextView> items = new ArrayList<>();
+                for (int i = 0; i < Math.min(6, props.size()); i++) {
+                    Txn t = props.get(i);
+                    String who = t.nom != null ? t.nom : t.numero != null ? t.numero : "";
+                    TextView it = text("○  " + opShort(t.op) + " " + SmsParser.fmt(t.montant) + " · " + when(t.date) + (who.isEmpty() ? "" : " · " + who), 13, INK, false);
+                    it.setPadding(0, dp(5), 0, dp(5));
+                    it.setOnClickListener(v -> {
+                        boolean choisi = !Caisse.cle(t).equals(lien[0]);
+                        lien[0] = choisi ? Caisse.cle(t) : null;
+                        dateLien[0] = choisi ? t.date : 0;
+                        for (int k = 0; k < items.size(); k++) {
+                            String tx = items.get(k).getText().toString().substring(1);
+                            items.get(k).setText((items.get(k) == it && choisi ? "●" : "○") + tx);
+                        }
+                        if (choisi) montant.setText(String.valueOf(t.montant / 100));
+                    });
+                    items.add(it);
+                    liste.addView(it, fill());
+                }
+                form.addView(liste, fill());
+                form.addView(text("L'opération choisie sera classée « Épargne / tontine » si elle n'est pas encore classée.", 11, MUTED, false));
+            }
+        }
+        ScrollView sv = new ScrollView(this);
+        sv.addView(form);
+        new AlertDialog.Builder(this)
+                .setTitle(titre)
+                .setView(sv)
+                .setPositiveButton("Enregistrer", (x, y) -> {
+                    String dg = montant.getText().toString().replaceAll("\\D", "");
+                    if (dg.isEmpty() || dg.length() > 10 || Long.parseLong(dg) == 0) { notice("Indiquez le montant.", 2); return; }
+                    Epargne.Versement v = new Epargne.Versement();
+                    v.id = java.util.UUID.randomUUID().toString();
+                    v.projet = p.id;
+                    v.sens = sens;
+                    v.membre = membre;
+                    v.seance = seance;
+                    v.montant = Long.parseLong(dg) * 100;
+                    v.date = dateLien[0] > 0 ? dateLien[0] : System.currentTimeMillis();
+                    v.cle = lien[0];
+                    v.motif = motif.getText().toString().trim();
+                    io.execute(() -> {
+                        Store st = Store.get(this);
+                        st.setVersementEpargne(v);
+                        if (v.cle != null && !classements.containsKey(v.cle)) st.classer(v.cle, Caisse.EPARGNE, p.nom);
+                        SyncJob.soon(this);
+                        runOnUiThread(() -> { notice("Enregistré : " + SmsParser.fmt(v.montant) + " FCFA.", 1); reload(false); });
+                    });
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    private void annulerVersement(Epargne.Versement v) {
+        new AlertDialog.Builder(this)
+                .setTitle("Supprimer ce mouvement ?")
+                .setMessage(SmsParser.fmt(v.montant) + " FCFA du " + Modules.date(v.date) + ".")
+                .setPositiveButton("Supprimer", (x, y) -> io.execute(() -> {
+                    v.annule = true;
+                    Store.get(this).setVersementEpargne(v);
+                    SyncJob.soon(this);
+                    runOnUiThread(this::render);
+                }))
+                .setNegativeButton("Annuler", null)
+                .show();
+    }
+
+    /** Coche ou décoche la cotisation d'un membre à une séance (tenue des comptes de la tontine). */
+    private void basculerCotisation(Epargne.Projet p, int seance, int membre) {
+        io.execute(() -> {
+            Store st = Store.get(this);
+            Epargne.Versement trouve = null;
+            for (Epargne.Versement v : st.versementsEpargne())
+                if (!v.annule && p.id.equals(v.projet) && v.seance == seance && v.membre == membre && v.sens > 0) trouve = v;
+            if (trouve != null) {
+                trouve.annule = true;
+                st.setVersementEpargne(trouve);
+            } else {
+                Epargne.Versement v = new Epargne.Versement();
+                v.id = java.util.UUID.randomUUID().toString();
+                v.projet = p.id;
+                v.sens = 1;
+                v.membre = membre;
+                v.seance = seance;
+                v.montant = p.montant;
+                v.date = System.currentTimeMillis();
+                st.setVersementEpargne(v);
+            }
+            SyncJob.soon(this);
+            runOnUiThread(this::render);
+        });
+    }
+
+    private void projetPage() {
+        Epargne.Projet p = projet(projetOuvert);
+        page.addView(retour("Finances"));
+        if (p == null || p.annule) { page.addView(empty("Ce projet a été supprimé.")); return; }
+        long now = System.currentTimeMillis();
+        List<Epargne.Versement> vs = Store.get(this).versementsEpargne();
+        List<Epargne.Versement> miens = new ArrayList<>();
+        for (Epargne.Versement v : vs) if (!v.annule && p.id.equals(v.projet)) miens.add(v);
+        miens.sort((a, b) -> Long.compare(b.date, a.date));
+        if (p.tontine()) {
+            Epargne.EtatTontine e = Epargne.tontine(p, vs, now);
+            pageTitle("Tontine · " + p.nom, SmsParser.fmt(p.montant) + " FCFA " + Epargne.frequenceNom(p.frequence) + " · " + p.membres.size()
+                    + " membres · " + SmsParser.fmt(p.pot()) + " FCFA par tour");
+            LinearLayout s = card();
+            if (p.moi >= 0) {
+                s.addView(kvSmall("Cotisé", SmsParser.fmt(e.cotise)));
+                s.addView(kvSmall("Reçu à mon tour", SmsParser.fmt(e.recu)));
+                s.addView(kvSmall(e.net() >= 0 ? "J'ai reçu en plus" : "Il me reste à recevoir", SmsParser.fmt(Math.abs(e.net()))));
+                if (e.monTour != null) s.addView(text("Votre tour : séance du " + Modules.date(e.monTour.date), 14, ACCENT, true));
+                if (e.retards > 0) s.addView(text("⚠  " + e.retards + " cotisation(s) non notée(s) aux séances passées.", 13, WARN, true));
+            } else {
+                s.addView(text("Vous tenez les comptes de cette tontine sans en être membre.", 13, MUTED, false));
+            }
+            s.addView(small("Modifier", INK, v -> ouvrirProjet(p, null)));
+            page.addView(s, fill());
+            page.addView(label("Séances"));
+            List<Epargne.Seance> ordre = new ArrayList<>(e.seances);
+            java.util.Collections.reverse(ordre);
+            for (Epargne.Seance se : ordre) {
+                LinearLayout c = card();
+                boolean courante = e.prochaine != null && se.n == e.prochaine.n;
+                LinearLayout h = new LinearLayout(this);
+                h.setGravity(Gravity.CENTER_VERTICAL);
+                h.addView(text("Séance " + (se.n + 1) + " · " + Modules.date(se.date), 14, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                if (courante) h.addView(chip("Prochaine", GOOD, GOOD_BG));
+                else if (se.passee) h.addView(chip("Passée", MUTED, BG));
+                c.addView(h, fill());
+                c.addView(text(se.monTour(p) ? "★ C'est votre tour (" + SmsParser.fmt(p.pot()) + " FCFA)" : "Tour de " + se.nomBeneficiaire, 13, se.monTour(p) ? GOOD : MUTED, se.monTour(p)));
+                c.addView(text(se.payes + " / " + p.membres.size() + " ont cotisé", 12, MUTED, false));
+                LinearLayout act = new LinearLayout(this);
+                if (p.moi >= 0) {
+                    if (se.moiPaye(p)) act.addView(small("✓ J'ai cotisé", GOOD, v -> basculerCotisation(p, se.n, p.moi)), weight(false));
+                    else act.addView(small("J'ai cotisé", ACCENT, v -> ouvrirVersement(p, 1, p.moi, se.n, p.montant, "Ma cotisation · séance du " + Modules.date(se.date))), weight(false));
+                    if (se.monTour(p)) {
+                        if (se.recu > 0) act.addView(small("✓ Reçu " + SmsParser.fmt(se.recu), GOOD, null), weight(false));
+                        else act.addView(small("J'ai reçu", GOOD, v -> ouvrirVersement(p, -1, p.moi, se.n, p.pot(), "Mon tour · séance du " + Modules.date(se.date))), weight(false));
+                    }
+                }
+                c.addView(act, fill());
+                // Tenue des comptes : qui a cotisé.
+                LinearLayout qui = column(0);
+                for (int i = 0; i < p.membres.size(); i++) {
+                    if (i == p.moi) continue;
+                    final int membre = i;
+                    CheckBox cb = new CheckBox(this);
+                    cb.setText(p.membres.get(i) + (i == se.beneficiaire ? " (bénéficiaire)" : ""));
+                    cb.setChecked(se.paye[i]);
+                    cb.setOnCheckedChangeListener((b, coche) -> basculerCotisation(p, se.n, membre));
+                    qui.addView(cb, fill());
+                }
+                if (qui.getChildCount() > 0 && (se.passee || courante)) {
+                    c.addView(label("Qui a cotisé"));
+                    c.addView(qui, fill());
+                }
+                page.addView(c, fill());
+            }
+        } else {
+            Epargne.EtatObjectif e = Epargne.objectif(p, vs, now);
+            pageTitle(p.nom, "Objectif : " + SmsParser.fmt(p.montant) + " FCFA" + (p.fin != null ? " pour le " + Modules.date(p.fin) : ""));
+            LinearLayout s = card();
+            TextView big = text(SmsParser.fmt(e.epargne) + " FCFA", 24, e.atteint ? GOOD : INK, true);
+            big.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+            s.addView(big);
+            s.addView(barre("Épargné", e.epargne, p.montant, e.atteint ? GOOD : ACCENT, e.pourcent + " %"), fill());
+            if (e.atteint) s.addView(text("Objectif atteint 🎉", 14, GOOD, true));
+            else {
+                s.addView(kvSmall("Reste", SmsParser.fmt(e.reste)));
+                if (e.parMois != null) s.addView(text("Pour y arriver à temps : " + SmsParser.fmt(e.parMois) + " par mois, ou " + SmsParser.fmt(e.parSemaine) + " par semaine.", 13, ACCENT, true));
+                if (e.enRetard) s.addView(text("⚠  La date est passée.", 13, WARN, true));
+            }
+            LinearLayout act = new LinearLayout(this);
+            act.addView(small("+ Verser", ACCENT, v -> ouvrirVersement(p, 1, -1, -1, e.parMois != null ? e.parMois : 0, "Verser · " + p.nom)), weight(true));
+            act.addView(small("− Retirer", INK, v -> ouvrirVersement(p, -1, -1, -1, 0, "Retirer · " + p.nom)), weight(false));
+            act.addView(small("Modifier", INK, v -> ouvrirProjet(p, null)), weight(false));
+            s.addView(act, fill());
+            page.addView(s, fill());
+        }
+        page.addView(label("Mouvements"));
+        LinearLayout l = card();
+        if (miens.isEmpty()) l.addView(text("Aucun mouvement pour l'instant.", 13, MUTED, false));
+        for (Epargne.Versement v : miens) {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(6), 0, dp(6));
+            String qui = p.tontine() && v.membre >= 0 && v.membre < p.membres.size() ? p.membres.get(v.membre) : "";
+            String desc = Modules.date(v.date) + (qui.isEmpty() ? "" : " · " + qui) + (v.seance >= 0 ? " · séance " + (v.seance + 1) : "")
+                    + (v.cle != null ? " · opération reliée" : "") + (v.motif.isEmpty() ? "" : " · " + v.motif);
+            row.addView(text(desc, 12, MUTED, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            row.addView(text((v.sens > 0 ? "+" : "−") + SmsParser.fmt(v.montant), 14, v.sens > 0 ? INK : GOOD, true));
+            row.setOnLongClickListener(x -> { annulerVersement(v); return true; });
+            l.addView(row, fill());
+        }
+        if (!miens.isEmpty()) l.addView(text("Appui long sur un mouvement pour le supprimer.", 11, MUTED, false));
+        page.addView(l, fill());
+    }
+
+    // ----- Application Analyse (0.16) -----
+
+    private Analyse.Rapport rapportAnalyse;
+    private String cleAnalyse = "";
+
+    /** Rapport d'analyse, recalculé seulement si les données ont changé (ou au plus toutes les minutes). */
+    private Analyse.Rapport analyse() {
+        long now = System.currentTimeMillis();
+        Map<String, Long> budgets = Store.get(this).budgets();
+        String cle = System.identityHashCode(result) + ":" + classements.size() + ":" + saisies.size() + ":" + jours.size() + ":"
+                + budgets + ":" + regles.size() + ":" + (now / 60000);
+        if (rapportAnalyse == null || !cle.equals(cleAnalyse)) {
+            rapportAnalyse = Analyse.calculer(this::computeBilan, this::computeSoldes, budgets, now);
+            cleAnalyse = cle;
+        }
+        return rapportAnalyse;
+    }
+
+    private View analyseCard() {
+        if (acces(Modules.ANALYSE) == Modules.Acces.ABSENT)
+            return promoModule(Modules.ANALYSE, "Évolution sur 12 mois, meilleurs jours et heures de vente, clients perdus, où part votre argent, "
+                    + "prévision de fin de mois et budgets proposés d'après vos dépenses.");
+        LinearLayout c = card();
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.addView(text("📊 Analyse", 16, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        if (!actif(Modules.ANALYSE)) head.addView(chip("Lecture seule", WARN, WARN_BG));
+        c.addView(head, fill());
+        if (result != null && actif(Modules.ANALYSE)) {
+            Analyse.Rapport r = analyse();
+            if (!r.alertes.isEmpty()) c.addView(text("⚠  " + r.alertes.get(0) + (r.alertes.size() > 1 ? " (+" + (r.alertes.size() - 1) + ")" : ""), 13, WARN, true));
+            else c.addView(text("Aucune alerte : tout est dans vos habitudes.", 13, GOOD, true));
+        } else {
+            c.addView(text("Tendances, ventes, dépenses, prévisions et budgets proposés.", 13, MUTED, false));
+        }
+        c.addView(button("Voir l'analyse  ›", true, v -> ouvrirAnalyse()), fill());
+        return c;
+    }
+
+    private void ouvrirAnalyse() {
+        fermerDetail();
+        analyseOuvert = true;
+        pageIdx = PAGE_FINANCES;
+        render();
+    }
+
+    /** Barre horizontale : libellé, barre proportionnelle, valeur. */
+    private View barre(String libelle, long valeur, long max, int couleur, String texte) {
+        LinearLayout r = column(2);
+        r.setPadding(0, dp(3), 0, dp(3));
+        LinearLayout top = new LinearLayout(this);
+        top.addView(text(libelle, 13, INK, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        top.addView(text(texte, 13, INK, true));
+        r.addView(top, fill());
+        LinearLayout bar = new LinearLayout(this);
+        bar.setBackground(box(BG, 0, 4));
+        int plein = (int) Math.round(Math.min(1.0, Math.max(0, valeur) / (double) Math.max(1, max)) * 1000);
+        View f = new View(this);
+        f.setBackground(box(couleur, 0, 4));
+        bar.addView(f, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, plein)));
+        bar.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, 1000 - plein)));
+        r.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(7)));
+        return r;
+    }
+
+    private void analysePage() {
+        page.addView(retour("Finances"));
+        pageTitle("Analyse", "Calculée sur votre téléphone à partir de vos opérations classées");
+        if (result == null) { page.addView(empty("Ouverture de vos données…")); return; }
+        boolean lecture = !actif(Modules.ANALYSE);
+        if (lecture) page.addView(bandeauLecture(Modules.ANALYSE), fill());
+        Analyse.Rapport r = analyse();
+
+        // Alertes.
+        if (!lecture && !r.alertes.isEmpty()) {
+            LinearLayout a = column(6);
+            a.setBackground(box(WARN_BG, 0, 14));
+            a.setPadding(dp(14), dp(12), dp(14), dp(12));
+            a.addView(text("À surveiller", 15, WARN, true));
+            for (String s : r.alertes) a.addView(text("•  " + s, 13, INK, false));
+            page.addView(a, fill());
+        }
+
+        // Prévisions.
+        if (!lecture) {
+            LinearLayout p = card();
+            p.addView(text("Ce mois, à ce rythme", 16, INK, true));
+            p.addView(text("Jour " + r.joursEcoules + " sur " + r.joursMois + " : projection d'après ce qui est déjà fait ce mois-ci.", 12, MUTED, false));
+            p.addView(kvSmall("Ventes prévues", SmsParser.fmt(r.ventesProjetees) + ecartTexte(r.ecartVentes)));
+            p.addView(kvSmall("Dépenses prévues (frais compris)", SmsParser.fmt(r.depensesProjetees) + ecartTexte(r.ecartDepenses)));
+            p.addView(kvSmall("Résultat prévu", SmsParser.fmt(r.ventesProjetees - r.depensesProjetees)));
+            if (r.moyVentes > 0 || r.moyDepenses > 0)
+                p.addView(text("Moyenne des 3 mois précédents : ventes " + SmsParser.fmt(r.moyVentes) + " · dépenses " + SmsParser.fmt(r.moyDepenses), 12, MUTED, false));
+            p.addView(divider());
+            if (r.tresorerie != null) p.addView(kvSmall("Trésorerie aujourd'hui", SmsParser.fmt(r.tresorerie)));
+            if (r.tresoreriePrevue != null) {
+                p.addView(kvSmall("Trésorerie prévue fin du mois", SmsParser.fmt(r.tresoreriePrevue)));
+                p.addView(text("D'après l'évolution des 30 derniers jours (" + (r.fluxJour >= 0 ? "+" : "−") + SmsParser.fmt(Math.abs(r.fluxJour)) + " par jour).", 12, MUTED, false));
+            }
+            if (r.dateManque != null) p.addView(text("⚠  À ce rythme, plus d'argent sur vos comptes vers le " + Modules.date(r.dateManque) + ".", 13, BAD, true));
+            page.addView(p, fill());
+        }
+
+        // Évolution sur 12 mois.
+        LinearLayout ev = card();
+        ev.addView(text("Évolution sur 12 mois", 16, INK, true));
+        long max = 1;
+        for (Analyse.Mois m : r.mois) if (!m.vide) max = Math.max(max, Math.max(m.chiffres.ventes, m.chiffres.depenses + m.chiffres.frais));
+        int affiches = 0;
+        for (Analyse.Mois m : r.mois) {
+            if (m.vide) continue;
+            affiches++;
+            long dep = m.chiffres.depenses + m.chiffres.frais;
+            LinearLayout bloc = column(1);
+            bloc.setPadding(0, dp(4), 0, dp(4));
+            LinearLayout h = new LinearLayout(this);
+            h.addView(text(m.nom + (m.enCours ? " (en cours)" : ""), 13, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            h.addView(text("résultat " + (m.chiffres.resultat < 0 ? "−" : "") + SmsParser.fmt(Math.abs(m.chiffres.resultat)), 12, m.chiffres.resultat < 0 ? BAD : GOOD, true));
+            bloc.addView(h, fill());
+            bloc.addView(barre("Ventes", m.chiffres.ventes, max, GOOD, SmsParser.fmt(m.chiffres.ventes)), fill());
+            bloc.addView(barre("Dépenses", dep, max, BAD, SmsParser.fmt(dep)), fill());
+            if (m.tresorerie != null) bloc.addView(text("Trésorerie " + (m.enCours ? "aujourd'hui" : "fin du mois") + " : " + SmsParser.fmt(m.tresorerie), 11, MUTED, false));
+            ev.addView(bloc, fill());
+        }
+        if (affiches == 0) ev.addView(text("Pas encore assez d'opérations classées.", 13, MUTED, false));
+        page.addView(ev, fill());
+        if (lecture) return;
+
+        // Ventes.
+        LinearLayout ve = card();
+        ve.addView(text("Vos ventes · 90 derniers jours", 16, INK, true));
+        if (r.nbVentes == 0) {
+            ve.addView(text("Aucune vente classée sur 90 jours. Classez vos entrées en « Vente » pour voir cette analyse.", 13, MUTED, false));
+        } else {
+            ve.addView(kvSmall("Ventes", r.nbVentes + " · " + SmsParser.fmt(r.totalVentes) + " FCFA"));
+            ve.addView(kvSmall("Panier moyen", SmsParser.fmt(r.panierMoyen) + " FCFA"));
+            ve.addView(text("Meilleur jour : " + r.meilleurJour() + " · meilleures heures : " + r.meilleureTranche(), 13, ACCENT, true));
+            ve.addView(label("Par jour de la semaine"));
+            long mj = 1;
+            for (long v : r.ventesJour) mj = Math.max(mj, v);
+            for (int i = 0; i < 7; i++) ve.addView(barre(Analyse.JOURS[i] + " · " + r.nbJour[i], r.ventesJour[i], mj, ACCENT, SmsParser.fmt(r.ventesJour[i])), fill());
+            ve.addView(label("Par heure"));
+            long mt = 1;
+            for (long v : r.ventesTranche) mt = Math.max(mt, v);
+            for (int i = 0; i < 6; i++) ve.addView(barre(Analyse.TRANCHES[i] + " · " + r.nbTranche[i], r.ventesTranche[i], mt, ACCENT, SmsParser.fmt(r.ventesTranche[i])), fill());
+            ve.addView(divider());
+            ve.addView(label("Clients (paiements reçus par OM, MoMo ou banque)"));
+            ve.addView(kvSmall("Clients sur 90 jours", String.valueOf(r.clients)));
+            ve.addView(kvSmall("Fidèles (2 des 3 derniers mois)", String.valueOf(r.fideles)));
+            ve.addView(kvSmall("Nouveaux (30 derniers jours)", String.valueOf(r.nouveaux)));
+            ve.addView(kvSmall("Perdus (rien depuis 45 jours)", String.valueOf(r.perdus)));
+            for (Analyse.Item it : r.clientsPerdus)
+                ve.addView(text("   " + nomItem(it) + " · " + it.nombre + " achats, " + SmsParser.fmt(it.montant) + " · dernier le " + Modules.date(it.derniere), 12, MUTED, false));
+        }
+        page.addView(ve, fill());
+
+        // Dépenses.
+        LinearLayout de = card();
+        de.addView(text("Où part l'argent · 90 derniers jours", 16, INK, true));
+        if (r.postes.isEmpty()) {
+            de.addView(text("Aucune dépense classée sur 90 jours.", 13, MUTED, false));
+        } else {
+            long mp = 1;
+            for (Analyse.Item it : r.postes) mp = Math.max(mp, it.montant);
+            for (Analyse.Item it : r.postes)
+                de.addView(barre(it.nom + " · " + it.nombre, it.montant, mp, BAD, SmsParser.fmt(it.montant) + " (≈ " + SmsParser.fmt(it.montant / 3) + "/mois)"), fill());
+            if (!r.beneficiaires.isEmpty()) {
+                de.addView(label("À qui vous payez le plus"));
+                for (Analyse.Item it : r.beneficiaires) de.addView(kvSmall(nomItem(it) + " · " + it.nombre + " fois", SmsParser.fmt(it.montant)));
+            }
+        }
+        de.addView(kvSmall("Frais opérateur", SmsParser.fmt(r.frais) + " (" + r.fraisPourcent() + " % des sorties)"));
+        if (!r.inhabituelles.isEmpty()) {
+            de.addView(label("Dépenses inhabituelles · 30 derniers jours"));
+            for (Analyse.Inhabituelle x : r.inhabituelles)
+                de.addView(text("⚠  " + SmsParser.fmt(x.montant) + " · " + Caisse.categorieNom(x.poste) + " · " + Modules.date(x.sms.date)
+                        + (x.sms.nom != null ? " · " + x.sms.nom : "") + " (d'habitude " + SmsParser.fmt(x.habituel) + ")", 13, WARN, true));
+        }
+        page.addView(de, fill());
+
+        // Budgets proposés et suivi.
+        LinearLayout bu = card();
+        bu.addView(text("Budgets", 16, INK, true));
+        bu.addView(text("Proposition = moyenne de vos dépenses des 3 derniers mois, arrondie aux 500 FCFA au-dessus.", 12, MUTED, false));
+        if (r.budgets.isEmpty()) bu.addView(text("Pas encore de dépenses classées pour proposer des budgets.", 13, MUTED, false));
+        for (Analyse.BudgetSuivi b : r.budgets) {
+            LinearLayout k = column(3);
+            k.setPadding(0, dp(6), 0, dp(6));
+            LinearLayout h = new LinearLayout(this);
+            h.setGravity(Gravity.CENTER_VERTICAL);
+            h.addView(text(Caisse.categorieNom(b.poste), 14, INK, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            h.addView(text(b.budget > 0 ? "budget " + SmsParser.fmt(b.budget) : "pas de budget", 12, MUTED, false));
+            k.addView(h, fill());
+            if (b.budget > 0) {
+                int coul = b.pourcent >= 100 ? BAD : b.pourcentProjete >= 100 ? WARN : GOOD;
+                k.addView(barre("Ce mois : " + SmsParser.fmt(b.depense), b.depense, b.budget, coul, b.pourcent + " %"), fill());
+                k.addView(text("À ce rythme : " + SmsParser.fmt(b.projection) + " à la fin du mois (" + b.pourcentProjete + " %)", 12, coul == GOOD ? MUTED : coul, coul != GOOD));
+                StringBuilder hs = new StringBuilder();
+                for (int i = 0; i < b.historique.size(); i++) {
+                    if (b.historique.get(i) == null) continue;
+                    hs.append(hs.length() > 0 ? " · " : "").append(b.moisHistorique.get(i)).append(" ").append(b.historique.get(i)).append(" %");
+                }
+                if (hs.length() > 0) k.addView(text("Mois passés : " + hs, 11, MUTED, false));
+            } else {
+                k.addView(text("Dépensé ce mois : " + SmsParser.fmt(b.depense), 12, MUTED, false));
+            }
+            if (b.propose > 0 && b.propose != b.budget) {
+                final Analyse.BudgetSuivi fb = b;
+                k.addView(small("Appliquer " + SmsParser.fmt(b.propose) + " FCFA / mois (moyenne " + SmsParser.fmt(b.moyenne) + ")", ACCENT,
+                        v -> appliquerBudgets(java.util.Collections.singletonList(fb))));
+            }
+            k.addView(divider());
+            bu.addView(k, fill());
+        }
+        List<Analyse.BudgetSuivi> aa = r.aAppliquer();
+        if (aa.size() > 1) bu.addView(button("Appliquer les " + aa.size() + " budgets proposés", true, v -> appliquerBudgets(aa)), fill());
+        page.addView(bu, fill());
+        page.addView(text("Les chiffres viennent des opérations classées : classez les opérations « À classer » pour une analyse complète. "
+                + "Elle est aussi dans l'export Excel (feuille « Analyse »).", 12, MUTED, false));
+    }
+
+    private static String ecartTexte(Integer e) {
+        return e == null ? "" : " (" + (e >= 0 ? "+" : "") + e + " % / moyenne)";
+    }
+
+    private String nomItem(Analyse.Item it) {
+        if (it.nom != null && !it.nom.trim().isEmpty()) return it.nom.trim();
+        return it.numero != null ? formatNumero(it.numero) : "—";
+    }
+
+    private void appliquerBudgets(List<Analyse.BudgetSuivi> liste) {
+        if (!exiger(Modules.ANALYSE)) return;
+        final List<Analyse.BudgetSuivi> l = new ArrayList<>(liste);
+        io.execute(() -> {
+            Store st = Store.get(this);
+            for (Analyse.BudgetSuivi b : l) st.setBudget(b.poste, b.propose);
+            SyncJob.soon(this);
+            runOnUiThread(() -> {
+                rapportAnalyse = null;
+                notice(l.size() == 1 ? "Budget « " + Caisse.categorieNom(l.get(0).poste) + " » : " + SmsParser.fmt(l.get(0).propose) + " FCFA par mois."
+                        : l.size() + " budgets enregistrés.", 1);
+                render();
+            });
+        });
+    }
 
     private View assistantCard() {
         LinearLayout c = card();
@@ -4290,7 +5148,10 @@ public class MainActivity extends Activity {
 
     /** Ferme un écran de détail (suivi, personne, catégorie) ; vrai s'il y en avait un. */
     private boolean fermerDetail() {
-        boolean ouvert = suiviOuvert != null || personneOuverte != null || categorieOuverte != null || applicationsOuvert || assistantOuvert;
+        boolean ouvert = suiviOuvert != null || personneOuverte != null || categorieOuverte != null || applicationsOuvert || assistantOuvert || analyseOuvert
+                || projetOuvert != null;
+        analyseOuvert = false;
+        projetOuvert = null;
         applicationsOuvert = false;
         assistantOuvert = false;
         suiviOuvert = null;
@@ -5071,7 +5932,8 @@ public class MainActivity extends Activity {
         final org.json.JSONObject vue = exportVue;
         final Caisse.Bilan b = toutes ? null : computeBilan(range[0], range[1]);
         final long maintenant = System.currentTimeMillis();
-        final Caisse.Especes especesJour = toutes ? null : computeBilan(Caisse.debutJour(Caisse.jourDe(maintenant)), maintenant).especes;
+        final Soldes.Releve rvExport = toutes ? null : computeSoldes(range[0], range[1]);
+        final Analyse.Rapport anExport = toutes || !actif(Modules.ANALYSE) || result == null ? null : analyse();
         notice("Préparation du rapport Excel…", 0);
         io.execute(() -> {
             String msg;
@@ -5083,8 +5945,9 @@ public class MainActivity extends Activity {
                 // 2. Écriture du fichier.
                 byte[] xlsx = toutes ? Exporter.consolide(vue, label, System.currentTimeMillis())
                         : Exporter.xlsx(r, b, range[0], range[1], label, maintenant,
-                                Finances.tresorerie(r, especesJour, Store.get(this).avoirs()), Store.get(this).budgets(),
-                                Dettes.calculer(Store.get(this).engagements(), maintenant));
+                                Finances.tresorerie(r, rvExport.comptes.contains(Soldes.ESPECES) ? rvExport.cloture.get(Soldes.ESPECES) : null,
+                                        Store.get(this).avoirs(), range[1]), Store.get(this).budgets(),
+                                Dettes.calculer(Store.get(this).engagements(), maintenant), rvExport, anExport);
                 try (OutputStream os = getContentResolver().openOutputStream(uri)) {
                     os.write(xlsx);
                 }
