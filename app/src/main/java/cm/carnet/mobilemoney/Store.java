@@ -27,7 +27,7 @@ public final class Store extends SQLiteOpenHelper {
     }
 
     private Store(Context ctx) {
-        super(ctx, "carnet.db", null, 9);
+        super(ctx, "carnet.db", null, 10);
     }
 
     @Override
@@ -54,6 +54,7 @@ public final class Store extends SQLiteOpenHelper {
         if (oldV < 7) createFinances(db);
         if (oldV < 8) createCategoriesPerso(db);
         if (oldV < 9) upgradeTo9(db);
+        if (oldV < 10) upgradeTo10(db);
     }
 
     /**
@@ -67,6 +68,100 @@ public final class Store extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE IF NOT EXISTS suivi (cle TEXT PRIMARY KEY, source TEXT, maj INTEGER)");
         db.execSQL("CREATE TABLE IF NOT EXISTS engagement (id TEXT PRIMARY KEY, tiers TEXT, numero TEXT, type TEXT, sens INTEGER,"
                 + " montant INTEGER, date INTEGER, echeance INTEGER, motif TEXT, cle TEXT, annule INTEGER DEFAULT 0, maj INTEGER)");
+    }
+
+    /** Version 10 (0.17) : épargne et tontines, communes au compte. */
+    private static void upgradeTo10(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS projet_epargne (id TEXT PRIMARY KEY, type TEXT, nom TEXT, montant INTEGER, frequence TEXT,"
+                + " debut INTEGER, fin INTEGER, membres TEXT, moi INTEGER, annule INTEGER DEFAULT 0, maj INTEGER)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS versement_epargne (id TEXT PRIMARY KEY, projet TEXT, date INTEGER, montant INTEGER, sens INTEGER,"
+                + " membre INTEGER, seance INTEGER, cle TEXT, motif TEXT, annule INTEGER DEFAULT 0, maj INTEGER)");
+    }
+
+    // ---------- Épargne et tontines ----------
+
+    public List<Epargne.Projet> projetsEpargne() {
+        List<Epargne.Projet> out = new ArrayList<>();
+        Cursor c = getReadableDatabase().query("projet_epargne",
+                new String[] {"id", "type", "nom", "montant", "frequence", "debut", "fin", "membres", "moi", "annule", "maj"}, null, null, null, null, "debut");
+        try {
+            while (c.moveToNext()) {
+                Epargne.Projet p = new Epargne.Projet();
+                p.id = c.getString(0);
+                p.type = c.isNull(1) ? Epargne.OBJECTIF : c.getString(1);
+                p.nom = c.isNull(2) ? "" : c.getString(2);
+                p.montant = c.isNull(3) ? 0 : c.getLong(3);
+                p.frequence = c.isNull(4) ? Epargne.MOIS : c.getString(4);
+                p.debut = c.isNull(5) ? 0 : c.getLong(5);
+                p.fin = c.isNull(6) ? null : c.getLong(6);
+                if (!c.isNull(7)) for (String m : c.getString(7).split("\n")) if (!m.trim().isEmpty()) p.membres.add(m.trim());
+                p.moi = c.isNull(8) ? -1 : c.getInt(8);
+                p.annule = !c.isNull(9) && c.getInt(9) != 0;
+                p.maj = c.isNull(10) ? 0 : c.getLong(10);
+                out.add(p);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    public void setProjetEpargne(Epargne.Projet p) {
+        ContentValues v = new ContentValues();
+        v.put("id", p.id);
+        v.put("type", p.type);
+        v.put("nom", p.nom);
+        v.put("montant", p.montant);
+        v.put("frequence", p.frequence);
+        v.put("debut", p.debut);
+        if (p.fin == null) v.putNull("fin"); else v.put("fin", p.fin);
+        v.put("membres", String.join("\n", p.membres));
+        v.put("moi", p.moi);
+        v.put("annule", p.annule ? 1 : 0);
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("projet_epargne", null, v, SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    public List<Epargne.Versement> versementsEpargne() {
+        List<Epargne.Versement> out = new ArrayList<>();
+        Cursor c = getReadableDatabase().query("versement_epargne",
+                new String[] {"id", "projet", "date", "montant", "sens", "membre", "seance", "cle", "motif", "annule", "maj"}, null, null, null, null, "date");
+        try {
+            while (c.moveToNext()) {
+                Epargne.Versement x = new Epargne.Versement();
+                x.id = c.getString(0);
+                x.projet = c.isNull(1) ? "" : c.getString(1);
+                x.date = c.isNull(2) ? 0 : c.getLong(2);
+                x.montant = c.isNull(3) ? 0 : c.getLong(3);
+                x.sens = c.isNull(4) ? 1 : c.getInt(4);
+                x.membre = c.isNull(5) ? -1 : c.getInt(5);
+                x.seance = c.isNull(6) ? -1 : c.getInt(6);
+                x.cle = c.isNull(7) ? null : c.getString(7);
+                x.motif = c.isNull(8) ? "" : c.getString(8);
+                x.annule = !c.isNull(9) && c.getInt(9) != 0;
+                x.maj = c.isNull(10) ? 0 : c.getLong(10);
+                out.add(x);
+            }
+        } finally {
+            c.close();
+        }
+        return out;
+    }
+
+    public void setVersementEpargne(Epargne.Versement x) {
+        ContentValues v = new ContentValues();
+        v.put("id", x.id);
+        v.put("projet", x.projet);
+        v.put("date", x.date);
+        v.put("montant", x.montant);
+        v.put("sens", x.sens);
+        v.put("membre", x.membre);
+        v.put("seance", x.seance);
+        if (x.cle == null) v.putNull("cle"); else v.put("cle", x.cle);
+        v.put("motif", x.motif == null ? "" : x.motif);
+        v.put("annule", x.annule ? 1 : 0);
+        v.put("maj", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("versement_epargne", null, v, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
     // ---------- Suivi de l'argent ----------
@@ -252,7 +347,15 @@ public final class Store extends SQLiteOpenHelper {
     }
 
     /** Filtre SQL des SMS de ce téléphone. */
-    private static final String ICI = "(origine IS NULL OR origine <> 'autre')";
+    /** SMS de ce téléphone : ni mis de côté (« autre »), ni écartés comme faux paiement (« faux », version 0.17). */
+    private static final String ICI = "(origine IS NULL OR origine NOT IN ('autre', 'faux'))";
+
+    /** Écarte un faux SMS de paiement : il ne compte plus nulle part et n'est jamais envoyé en sauvegarde. */
+    public boolean ecarterFaux(String address, String body) {
+        ContentValues v = new ContentValues();
+        v.put("origine", "faux");
+        return getWritableDatabase().update("sms", v, "hash = ?", new String[] {hash(address, body)}) > 0;
+    }
 
     /** Version 5 : mémoire de lecture, pour ne plus relire à chaque ouverture les SMS déjà compris. */
     private static void createLecture(SQLiteDatabase db) {
@@ -369,7 +472,7 @@ public final class Store extends SQLiteOpenHelper {
     /** Signature des données (nombre et dernière modification) : sert à savoir si les résumés sont à recalculer. */
     public String signature() {
         StringBuilder b = new StringBuilder();
-        for (String t : new String[] {"sms", "classement", "regle", "saisie", "jour", "budget", "avoir", "categorie_perso", "suivi", "engagement"}) {
+        for (String t : new String[] {"sms", "classement", "regle", "saisie", "jour", "budget", "avoir", "categorie_perso", "suivi", "engagement", "projet_epargne", "versement_epargne"}) {
             Cursor c = getReadableDatabase().rawQuery("SELECT COUNT(*), MAX(maj) FROM " + t, null);
             try {
                 if (c.moveToFirst()) b.append(c.getLong(0)).append(':').append(c.isNull(1) ? 0 : c.getLong(1)).append('|');
@@ -637,6 +740,8 @@ public final class Store extends SQLiteOpenHelper {
             new Spec("suivi", "cle", false, "cle", "source", "maj:n"),
             new Spec("engagement", "id", false, "id", "tiers", "numero", "type", "sens:n", "montant:n", "date:n", "echeance:n", "motif", "cle",
                     "annule:n", "maj:n"),
+            new Spec("projet_epargne", "id", false, "id", "type", "nom", "montant:n", "frequence", "debut:n", "fin:n", "membres", "moi:n", "annule:n", "maj:n"),
+            new Spec("versement_epargne", "id", false, "id", "projet", "date:n", "montant:n", "sens:n", "membre:n", "seance:n", "cle", "motif", "annule:n", "maj:n"),
     };
 
     /** Lignes modifiées après "since", par ordre de modification. Valeurs : String, Long ou null. */

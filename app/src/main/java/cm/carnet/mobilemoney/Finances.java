@@ -36,8 +36,16 @@ public final class Finances {
      * (comptées, sinon théoriques) et autres avoirs saisis.
      */
     public static Tresorerie tresorerie(Analyzer.Result r, Caisse.Especes especesDuJour, List<Store.Avoir> avoirs) {
+        return tresorerie(r, especes(especesDuJour), avoirs, Long.MAX_VALUE);
+    }
+
+    /**
+     * Trésorerie à la fin d'une période (version 0.15) : soldes lus jusqu'à « to », espèces à cette date (null : inconnues).
+     * Les autres avoirs saisis gardent leur dernière valeur.
+     */
+    public static Tresorerie tresorerie(Analyzer.Result r, Long especes, List<Store.Avoir> avoirs, long to) {
         Tresorerie t = new Tresorerie();
-        for (Analyzer.Account a : Analyzer.summary(r, 0, Long.MAX_VALUE)) {
+        for (Analyzer.Account a : Analyzer.summary(r, 0, to)) {
             if (a.reel == null) continue;
             Poste p = new Poste();
             p.op = a.op;
@@ -46,7 +54,7 @@ public final class Finances {
             p.date = a.to;
             t.postes.add(p);
         }
-        Long esp = especes(especesDuJour);
+        Long esp = especes;
         if (esp != null) {
             Poste p = new Poste();
             p.op = Caisse.ESPECES;

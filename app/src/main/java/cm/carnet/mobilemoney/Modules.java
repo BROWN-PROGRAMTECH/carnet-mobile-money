@@ -17,7 +17,7 @@ import java.util.Set;
 public final class Modules {
     private Modules() {}
 
-    public static final String CAISSE = "CAISSE", FINANCES = "FINANCES", SUIVI = "SUIVI", DETTES = "DETTES", MULTI = "MULTI", ALERTES = "ALERTES", ASSISTANT = "ASSISTANT";
+    public static final String CAISSE = "CAISSE", FINANCES = "FINANCES", SUIVI = "SUIVI", DETTES = "DETTES", MULTI = "MULTI", ALERTES = "ALERTES", ASSISTANT = "ASSISTANT", ANALYSE = "ANALYSE";
     public static final String PACK_PARTICULIER = "PACK_PARTICULIER", PACK_COMMERCANT = "PACK_COMMERCANT", PACK_ENTREPRISE = "PACK_ENTREPRISE";
 
     /** ACTIF : utilisable ; LECTURE : abonnement terminé, données visibles sans ajout ; ABSENT : jamais installée. */
@@ -188,7 +188,7 @@ public final class Modules {
     }
 
     /** Applications (hors packs), dans l'ordre d'affichage. */
-    public static final List<String> TOUTES = Arrays.asList(CAISSE, FINANCES, SUIVI, DETTES, MULTI, ALERTES, ASSISTANT);
+    public static final List<String> TOUTES = Arrays.asList(CAISSE, FINANCES, ANALYSE, SUIVI, DETTES, MULTI, ALERTES, ASSISTANT);
 
     /** Profils proposés à l'inscription et ce qu'ils pré-cochent. */
     public static final String[][] PROFILS = {

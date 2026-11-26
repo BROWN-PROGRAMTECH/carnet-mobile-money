@@ -41,6 +41,7 @@ public class SmsReceiver extends BroadcastReceiver {
                 }
                 return;
             }
+            rappelEpargne(ctx);
             boolean isNew = Store.get(ctx).insert(sms);
             ctx.sendBroadcast(new Intent(ACTION_NEW).setPackage(ctx.getPackageName()));
             if (!isNew) return;
@@ -48,6 +49,7 @@ public class SmsReceiver extends BroadcastReceiver {
 
             sms.op = op;
             Txn t = SmsParser.parse(sms, cfg);
+            if (t.kind == Txn.TX) verifierPaiement(ctx, t);
             if (t.kind == Txn.TX && t.isBalanceCheck()) {
                 notify(ctx, Txn.opName(op) + " : solde " + SmsParser.fmt(t.solde) + " FCFA", "Consultation de solde enregistrée.");
             } else if (t.kind == Txn.TX) {
@@ -61,6 +63,59 @@ public class SmsReceiver extends BroadcastReceiver {
         } catch (Exception ignored) {
             // Un SMS illisible ne doit jamais faire planter la réception.
         }
+    }
+
+    /**
+     * Version 0.17 : paiement reçu qui ne suit pas la chaîne des soldes (faux SMS niveau 2), puis float agent bas.
+     * Le dernier solde connu de chaque compte est tenu ici à chaque SMS, et recalé par l'application sur le relevé complet.
+     */
+    static void verifierPaiement(Context ctx, Txn t) {
+        if (!Caisse.OM.equals(t.op) && !Caisse.MOMO.equals(t.op)) return;
+        long now = System.currentTimeMillis();
+        String ch = Store.pref(ctx, "chaine_" + t.op, "");
+        Long prev = null;
+        try { if (!ch.isEmpty()) prev = Long.parseLong(ch); } catch (NumberFormatException ignored) {}
+        java.util.List<String> ids = new java.util.ArrayList<>(java.util.Arrays.asList(Store.pref(ctx, "ids_" + t.op, "").split(",")));
+        ids.remove("");
+        String doute = FauxSms.chaine(t, prev, ids);
+        if (doute != null) {
+            notify(ctx, "⚠ Paiement non confirmé : ne livrez pas", doute);
+            Store.savePref(ctx, "faux_sms", now + "|" + doute);
+            String d = Store.pref(ctx, "douteux", "");
+            Store.savePref(ctx, "douteux", (d.isEmpty() ? "" : d + "\n") + Caisse.cle(t));
+        } else if (t.solde != null) {
+            Store.savePref(ctx, "chaine_" + t.op, String.valueOf(t.solde));
+        }
+        if (t.txnId != null && !ids.contains(t.txnId)) {
+            ids.add(t.txnId);
+            while (ids.size() > 100) ids.remove(0);
+            Store.savePref(ctx, "ids_" + t.op, String.join(",", ids));
+        }
+        // Float agent : seuil choisi (FCFA), sinon une journée moyenne de dépôts (calculée par l'application).
+        if (doute == null && t.solde != null && Store.prefBool(ctx, "agent" + t.op, false)) {
+            long seuil = Store.prefLong(ctx, "seuil_float_" + t.op, 0) * 100;
+            if (seuil <= 0) seuil = Store.prefLong(ctx, "float_auto_" + t.op, 0);
+            String jour = Caisse.jourDe(now);
+            if (seuil > 0 && t.solde < seuil && !jour.equals(Store.pref(ctx, "float_alerte_" + t.op, ""))) {
+                Store.savePref(ctx, "float_alerte_" + t.op, jour);
+                notify(ctx, "Float " + Txn.opName(t.op) + " bas", "Il reste " + SmsParser.fmt(t.solde) + " FCFA (seuil " + SmsParser.fmt(seuil)
+                        + "). Rechargez votre compte agent pour servir les dépôts.");
+            }
+        }
+    }
+
+    /** Rappels d'épargne et de tontine, une fois par jour au plus. */
+    static void rappelEpargne(Context ctx) {
+        try {
+            long now = System.currentTimeMillis();
+            String jour = Caisse.jourDe(now);
+            if (jour.equals(Store.pref(ctx, "rappel_epargne", ""))) return;
+            Store st = Store.get(ctx);
+            java.util.List<String> r = Epargne.rappels(st.projetsEpargne(), st.versementsEpargne(), now);
+            if (r.isEmpty()) return;
+            Store.savePref(ctx, "rappel_epargne", jour);
+            notify(ctx, r.size() == 1 ? "Épargne et tontine" : "Épargne et tontine · " + r.size() + " rappels", String.join("\n", r));
+        } catch (Exception ignored) {}
     }
 
     static void notify(Context ctx, String title, String text) {

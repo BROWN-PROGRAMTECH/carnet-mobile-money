@@ -120,6 +120,8 @@ public final class Caisse {
         return (type > 0 ? PREFIXE_RECETTE : type < 0 ? PREFIXE_CHARGE : PREFIXE_HORS) + id;
     }
     // Entrées et sorties
+    /** Épargne ou tontine (version 0.17) : argent mis de côté (sortie) ou récupéré (entrée). Hors résultat. */
+    public static final String EPARGNE = "EPARGNE";
     public static final String DON = "DON", TRANSFERT = "TRANSFERT", AUTRE = "AUTRE";
     /** Dépôt ou retrait d'un client sur un compte agent (classé automatiquement, entrée ou sortie). */
     public static final String AGENT = "AGENT";
@@ -128,14 +130,14 @@ public final class Caisse {
 
     /** Toutes les catégories proposées, dans l'ordre des totaux et de l'export. */
     public static final String[] CATEGORIES = {VENTE, APPORT, PRET_RECU, REMB_RECU, ACHAT, CHARGE_LOYER, CHARGE_SALAIRE, CHARGE_TRANSPORT, CHARGE_ENERGIE,
-            CHARGE_TELECOM, CHARGE_TAXES, CHARGE, RETRAIT_PERSO, PRET_ACCORDE, REMB_PRET, DON, TRANSFERT, AUTRE};
+            CHARGE_TELECOM, CHARGE_TAXES, CHARGE, RETRAIT_PERSO, PRET_ACCORDE, REMB_PRET, EPARGNE, DON, TRANSFERT, AUTRE};
     /** Catégories proposées sur une entrée, puis sur une sortie. */
-    public static final String[] ENTREES = {VENTE, APPORT, PRET_RECU, REMB_RECU, DON, TRANSFERT, AUTRE};
+    public static final String[] ENTREES = {VENTE, APPORT, PRET_RECU, REMB_RECU, EPARGNE, DON, TRANSFERT, AUTRE};
     public static final String[] SORTIES = {ACHAT, CHARGE_LOYER, CHARGE_SALAIRE, CHARGE_TRANSPORT, CHARGE_ENERGIE, CHARGE_TELECOM, CHARGE_TAXES, CHARGE,
-            RETRAIT_PERSO, PRET_ACCORDE, REMB_PRET, DON, TRANSFERT, AUTRE};
+            RETRAIT_PERSO, PRET_ACCORDE, REMB_PRET, EPARGNE, DON, TRANSFERT, AUTRE};
     /** Regroupement affiché dans le choix de catégorie. */
     public static final String[] SORTIES_PRINCIPALES = {ACHAT, RETRAIT_PERSO, REMB_PRET};
-    public static final String[] LES_DEUX = {DON, TRANSFERT, AUTRE};
+    public static final String[] LES_DEUX = {EPARGNE, DON, TRANSFERT, AUTRE};
 
     public static String[] pour(int sens) {
         return sens > 0 ? ENTREES : SORTIES;
@@ -213,6 +215,7 @@ public final class Caisse {
             case CHARGE_TAXES: return "Impôts et taxes";
             case RETRAIT_PERSO: return "Retrait personnel";
             case REMB_PRET: return "Remboursement de dette";
+            case EPARGNE: return "Épargne / tontine";
             case DON: return "Don";
             case TRANSFERT: return "Transfert entre mes comptes";
             case AGENT: return "Opération client (agent)";
@@ -245,6 +248,7 @@ public final class Caisse {
             case CHARGE_TAXES: return "Taxes";
             case RETRAIT_PERSO: return "Retrait perso";
             case REMB_PRET: return "Remb. dette";
+            case EPARGNE: return "Épargne";
             case DON: return "Don";
             case TRANSFERT: return "Transfert";
             default: return "Autre";
@@ -287,6 +291,7 @@ public final class Caisse {
             case CHARGE_TAXES: return "Impôts, patente, taxes communales. Compte dans le résultat (−).";
             case RETRAIT_PERSO: return "Argent pris pour vous ou votre famille. Hors résultat.";
             case REMB_PRET: return "Vous remboursez quelqu'un qui vous avait prêté. Hors résultat.";
+            case EPARGNE: return "Argent mis de côté (épargne, cotisation de tontine) ou récupéré (retrait, votre tour). Hors résultat.";
             case DON: return "Don reçu ou donné. Hors résultat.";
             case TRANSFERT: return "Argent déplacé entre vos propres comptes (OM, MoMo, espèces). Hors résultat.";
             case AGENT: return "Dépôt ou retrait d'un client sur votre compte agent. Hors résultat.";
